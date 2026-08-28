@@ -63,12 +63,28 @@ def test_forced_reingestion_keeps_the_count_stable(real_pipeline, make_pdf):
 
 
 def test_every_stored_chunk_fits_the_model_window(real_pipeline, make_pdf):
-    body = " ".join([PAGE_ONE, PAGE_TWO] * 20)
-    real_pipeline.ingest_file(make_pdf([body], name="long.pdf"))
+    # A genuinely long document: 20 pages of prose, not one clipped line.
+    pages = [f"{PAGE_ONE} {PAGE_TWO}"] * 20
+    result = real_pipeline.ingest_file(make_pdf(pages, name="long.pdf"))
+    assert result.status == "ingested"
+    assert result.chunk_count > 1, "a 20-page document should produce many chunks"
+
     tokenizer = real_pipeline.embedder.tokenizer
     limit = real_pipeline.config.max_model_tokens
     for chunk in real_pipeline.store.iter_chunks():
         assert tokenizer.count_tokens(chunk.text) <= limit
+
+
+def test_a_long_document_loses_no_text(real_pipeline, make_pdf):
+    """Every word of the source must survive parsing and chunking."""
+    pages = [f"{PAGE_ONE} {PAGE_TWO}"] * 10
+    real_pipeline.ingest_file(make_pdf(pages, name="lossless.pdf"), chunk_size=64,
+                              overlap=16)
+
+    stored = " ".join(c.text for c in real_pipeline.store.iter_chunks())
+    for phrase in ("headcount changes across all business units",
+                   "twelve consecutive breeding seasons"):
+        assert phrase in stored, f"missing from the corpus: {phrase!r}"
 
 
 def test_export_covers_every_stored_chunk(real_pipeline, make_pdf, tmp_path):

@@ -8,11 +8,25 @@ import pytest
 
 
 def _build_pdf(path: Path, pages: list[str], *, encrypt: bool = False) -> Path:
-    """Write a small text PDF. One string per page."""
+    """Write a small text PDF. One string per page.
+
+    Text is laid out with insert_textbox so it wraps. insert_text draws a single
+    unwrapped line and PyMuPDF silently clips whatever runs past the page edge,
+    which would quietly shorten any fixture longer than one line.
+    """
     doc = pymupdf.open()
     for body in pages:
         page = doc.new_page()
-        page.insert_text((72, 72), body, fontsize=11)
+        margin = 50
+        box = pymupdf.Rect(
+            margin, margin, page.rect.width - margin, page.rect.height - margin
+        )
+        overflow = page.insert_textbox(box, body, fontsize=11)
+        if overflow < 0:
+            raise ValueError(
+                f"fixture text does not fit on one page (overflow {overflow}); "
+                "split it across more pages"
+            )
     if encrypt:
         doc.save(
             path,
