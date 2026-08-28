@@ -58,6 +58,11 @@ class WhitespaceTokenizer:
             for i in range(0, len(words), max_tokens)
         ]
 
+    def tail_tokens(self, text: str, max_tokens: int) -> str:
+        if max_tokens <= 0:
+            return ""
+        return " ".join(text.split()[-max_tokens:])
+
 
 @pytest.fixture
 def tokenizer():
