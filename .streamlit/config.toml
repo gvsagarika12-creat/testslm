@@ -1,0 +1,15 @@
+# Streamlit's module watcher walks all of site-packages to decide what to
+# hot-reload. transformers v5 lazily exposes hundreds of vision models whose
+# image processors import torchvision, which this project deliberately does not
+# install (the embedding model is text-only). Each probe printed a full
+# ModuleNotFoundError traceback, burying the startup banner in noise.
+# Disabling the watcher removes it. Cost: app.py edits need a manual restart.
+[server]
+fileWatcherType = "none"
+
+# Bind to loopback only. Streamlit defaults to 0.0.0.0, which would expose the
+# ingested documents to anyone on the same network.
+address = "localhost"
+
+[browser]
+gatherUsageStats = false
