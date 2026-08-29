@@ -81,3 +81,55 @@ class WhitespaceTokenizer:
 @pytest.fixture
 def tokenizer():
     return WhitespaceTokenizer()
+
+
+# --- PostgreSQL test support ------------------------------------------------
+#
+# Store tests run against both backends to prove they behave identically.
+# Postgres tests use a dedicated `ragforge_test` database so they can never
+# touch real ingested data, and the table is truncated between tests to give
+# each one the empty store the Chroma fixture gets from tmp_path.
+
+def _admin_url() -> str:
+    from ragforge.config import settings
+
+    return settings.database_url
+
+
+@pytest.fixture(scope="session")
+def pg_database():
+    """Factory creating isolated test databases: pg_database("name") -> url.
+
+    Each caller gets its own database. The chunks table pins a vector width at
+    creation time, so modules embedding at different dimensions must not share
+    one, and no test database is ever the real corpus.
+    """
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover
+        pytest.skip("psycopg not installed")
+
+    admin = _admin_url()
+    try:
+        with psycopg.connect(admin, autocommit=True, connect_timeout=5) as con:
+            con.execute("SELECT 1")
+    except Exception as exc:
+        pytest.skip(
+            f"PostgreSQL not reachable ({exc.__class__.__name__}); "
+            "start it with: docker compose up -d"
+        )
+
+    created: set[str] = set()
+
+    def _make(name: str) -> str:
+        if name not in created:
+            with psycopg.connect(admin, autocommit=True, connect_timeout=5) as con:
+                exists = con.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s", (name,)
+                ).fetchone()
+                if not exists:
+                    con.execute(f'CREATE DATABASE "{name}"')
+            created.add(name)
+        return admin.rsplit("/", 1)[0] + f"/{name}"
+
+    return _make

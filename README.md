@@ -12,7 +12,16 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-The first run downloads the embedding model (`BAAI/bge-small-en-v1.5`, ~130 MB).
+Start the database (PostgreSQL 16 with pgvector, in Docker):
+
+```powershell
+docker compose up -d
+```
+
+The first app run downloads the embedding model (`BAAI/bge-small-en-v1.5`, ~130 MB).
+
+The database must be running before the app starts. `docker compose down` stops
+it and keeps your data; `docker compose down -v` deletes the stored vectors.
 
 ## Use
 
@@ -34,16 +43,20 @@ python cli.py export corpus.jsonl
 ## How it works
 
 ```
-PDF ──▶ parse ──▶ chunk ──▶ embed ──▶ ChromaDB
+PDF ──▶ parse ──▶ chunk ──▶ embed ──▶ PostgreSQL + pgvector
         (PyMuPDF)  (token-   (bge-small,
                     aware)     CPU)
 ```
 
 `ragforge/` holds the core library — `parse`, `chunk`, and `embed` are pure and
-never touch the database, so they test in isolation. `store.py` sits behind a
-`VectorStore` Protocol; swapping ChromaDB for Qdrant means adding one file.
-`pipeline.py` is the only API the interfaces use, so the UI and CLI cannot drift
-apart.
+never touch the database, so they test in isolation. `pipeline.py` is the only
+API the interfaces use, so the UI and CLI cannot drift apart.
+
+Storage sits behind a `VectorStore` Protocol with two interchangeable
+implementations: `pg_store.PgVectorStore` (PostgreSQL + pgvector, the default)
+and `store.ChromaStore` (embedded ChromaDB, no server required). The same
+behavioural test suite runs against both, so they cannot diverge. Select one
+with `RAGFORGE_STORE_BACKEND`.
 
 ## Configuration
 
@@ -55,7 +68,21 @@ or a `.env` file:
 | `RAGFORGE_CHUNK_SIZE` | 400 | Tokens per chunk |
 | `RAGFORGE_CHUNK_OVERLAP` | 60 | Tokens carried between chunks |
 | `RAGFORGE_EMBEDDING_MODEL_NAME` | `BAAI/bge-small-en-v1.5` | Embedding model |
-| `RAGFORGE_DATA_DIR` | `./data` | Uploads and database location |
+| `RAGFORGE_DATA_DIR` | `./data` | Uploaded PDFs (and the Chroma store, if used) |
+| `RAGFORGE_STORE_BACKEND` | `postgres` | `postgres` or `chroma` |
+| `RAGFORGE_DATABASE_URL` | `postgresql://ragforge:ragforge@127.0.0.1:5432/ragforge` | Postgres connection |
+| `RAGFORGE_EMBEDDING_DIMENSION` | 384 | Must match the model and the `vector(N)` column |
+
+To run without Docker, set `RAGFORGE_STORE_BACKEND=chroma` — everything works
+identically, storing to `data/chroma/` with no server.
+
+### Migrating an existing ChromaDB corpus
+
+```powershell
+python cli.py migrate
+```
+
+Chunks move with their stored vectors, so nothing is re-embedded.
 
 ## Tuning chunk size
 

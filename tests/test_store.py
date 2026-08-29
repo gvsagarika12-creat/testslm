@@ -1,3 +1,8 @@
+"""Behavioural tests for the vector store.
+
+Every test runs against BOTH backends. The two implementations are meant to be
+interchangeable, so any difference in behaviour is a bug in one of them.
+"""
 import pytest
 
 from ragforge.chunk import Chunk
@@ -29,9 +34,24 @@ def unit(*values):
     return [v / norm for v in padded]
 
 
-@pytest.fixture
-def store(tmp_path):
-    return ChromaStore(persist_dir=tmp_path / "chroma", collection_name="test")
+@pytest.fixture(params=["chroma", "postgres"])
+def store(request, tmp_path):
+    """An empty store. Parametrized so every test runs on both backends."""
+    if request.param == "chroma":
+        yield ChromaStore(persist_dir=tmp_path / "chroma", collection_name="test")
+        return
+
+    url = request.getfixturevalue("pg_database")("ragforge_test_store")
+    from ragforge.pg_store import PgVectorStore
+
+    pg = PgVectorStore(url, dimension=DIM)
+    # Each test expects to start empty, matching the fresh tmp_path Chroma gets.
+    with pg._conn.cursor() as cur:
+        cur.execute("TRUNCATE chunks")
+    try:
+        yield pg
+    finally:
+        pg.close()
 
 
 def test_starts_empty(store):

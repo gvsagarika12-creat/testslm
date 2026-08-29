@@ -68,6 +68,18 @@ def stats() -> None:
 
 
 @app.command()
+def migrate() -> None:
+    """Copy an existing ChromaDB corpus into PostgreSQL.
+
+    Vectors are carried over as-is, so nothing is re-embedded.
+    """
+    from ragforge.migrate import migrate_chroma_to_postgres
+
+    moved = migrate_chroma_to_postgres()
+    typer.echo(f"Migrated {moved} chunks from ChromaDB into PostgreSQL.")
+
+
+@app.command()
 def export(
     out_path: Path = typer.Argument(..., help="Destination .jsonl file."),
 ) -> None:

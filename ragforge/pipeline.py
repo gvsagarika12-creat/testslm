@@ -157,23 +157,41 @@ class Pipeline:
 
     def stats(self) -> dict:
         documents = self.store.list_documents()
-        return {
+        info = {
             "documents": len(documents),
             "chunks": self.store.count(),
-            "collection": self.config.collection_name,
-            "chroma_dir": str(self.config.chroma_dir),
+            "backend": self.config.store_backend,
         }
+        if self.config.store_backend == "postgres":
+            # Never print the password.
+            url = self.config.database_url
+            info["location"] = url.rsplit("@", 1)[-1] if "@" in url else url
+        else:
+            info["location"] = str(self.config.chroma_dir)
+            info["collection"] = self.config.collection_name
+        return info
+
+
+def build_store(config: Settings) -> VectorStore:
+    """Construct the vector store named by config.store_backend."""
+    if config.store_backend == "postgres":
+        from ragforge.pg_store import PgVectorStore
+
+        return PgVectorStore(config.database_url, config.embedding_dimension)
+
+    from ragforge.store import ChromaStore
+
+    return ChromaStore(config.chroma_dir, config.collection_name)
 
 
 def build_pipeline(config: Settings | None = None) -> Pipeline:
-    """Wire the real ChromaStore and Embedder together."""
+    """Wire the configured store and the Embedder together."""
     from ragforge.embed import Embedder
-    from ragforge.store import ChromaStore
 
     config = config or default_settings
     config.ensure_dirs()
     return Pipeline(
-        store=ChromaStore(config.chroma_dir, config.collection_name),
+        store=build_store(config),
         embedder=Embedder(config),
         config=config,
     )
