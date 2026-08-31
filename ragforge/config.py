@@ -29,6 +29,10 @@ class Settings(BaseSettings):
 
     # Which vector store backs the corpus. "postgres" is the default; "chroma"
     # remains available as a no-server fallback for anyone without Docker.
+    # Where uploaded source files are kept. "ftp" and friends slot in here
+    # without the pipeline changing; see ragforge/filestore.py.
+    file_store_backend: Literal["local"] = "local"
+
     store_backend: Literal["postgres", "chroma"] = "postgres"
     database_url: str = "postgresql://ragforge:ragforge@127.0.0.1:5432/ragforge"
     # Must equal the embedding model's output size and the vector(N) column.

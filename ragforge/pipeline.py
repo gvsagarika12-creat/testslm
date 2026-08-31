@@ -1,13 +1,18 @@
 """Orchestration. Contains no algorithms — only sequencing and error boundaries."""
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ragforge.chunk import chunk_pages
 from ragforge.config import Settings, settings as default_settings
+from ragforge.filestore import (
+    FileStore,
+    FileStoreError,
+    LocalFileStore,
+    build_file_store,
+)
 from ragforge.parse import PdfParseError, compute_doc_id, extract_pages
 from ragforge.store import Hit, VectorStore
 
@@ -18,6 +23,7 @@ class FileResult:
     status: str  # "ingested" | "skipped" | "failed"
     chunk_count: int = 0
     message: str = ""
+    stored_uri: str = ""  # where the source file was kept, if it was stored
 
 
 @dataclass
@@ -42,10 +48,17 @@ class IngestReport:
 
 
 class Pipeline:
-    def __init__(self, store: VectorStore, embedder, config: Settings | None = None):
+    def __init__(
+        self,
+        store: VectorStore,
+        embedder,
+        config: Settings | None = None,
+        file_store: FileStore | None = None,
+    ):
         self.store = store
         self.embedder = embedder
         self.config = config or default_settings
+        self.file_store = file_store or LocalFileStore(self.config.uploads_dir)
 
     def ingest_file(
         self,
@@ -118,12 +131,21 @@ class Pipeline:
         self.store.delete_by_filename(path.name)
         self.store.upsert(chunks, vectors)
 
-        self.config.ensure_dirs()
-        destination = self.config.uploads_dir / path.name
-        if path.resolve() != destination.resolve():
-            shutil.copy2(path, destination)
+        # Keep the source file so the original stays recoverable. A storage
+        # failure here does not undo a successful ingestion — the chunks are
+        # already searchable — so it is reported rather than raised.
+        stored_uri = ""
+        try:
+            stored_uri = self.file_store.save(path.name, data)
+        except FileStoreError as exc:
+            return FileResult(
+                path, "ingested", len(chunks),
+                f"{len(chunks)} chunks (source file not stored: {exc})",
+            )
 
-        return FileResult(path, "ingested", len(chunks), f"{len(chunks)} chunks")
+        return FileResult(
+            path, "ingested", len(chunks), f"{len(chunks)} chunks", stored_uri
+        )
 
     def ingest_path(
         self,
@@ -161,6 +183,7 @@ class Pipeline:
             "documents": len(documents),
             "chunks": self.store.count(),
             "backend": self.config.store_backend,
+            "file_store": self.file_store.location,
         }
         if self.config.store_backend == "postgres":
             # Never print the password.
@@ -194,4 +217,5 @@ def build_pipeline(config: Settings | None = None) -> Pipeline:
         store=build_store(config),
         embedder=Embedder(config),
         config=config,
+        file_store=build_file_store(config),
     )

@@ -52,6 +52,44 @@ def test_the_source_pdf_is_copied_into_uploads(pipeline, make_pdf):
     assert (pipeline.config.uploads_dir / "report.pdf").is_file()
 
 
+def test_ingest_reports_where_the_source_was_stored(pipeline, make_pdf):
+    result = pipeline.ingest_file(make_pdf(["alpha beta"], name="report.pdf"))
+    assert result.stored_uri.startswith("file:///")
+    assert result.stored_uri.endswith("report.pdf")
+
+
+def test_the_stored_file_is_byte_identical_to_the_source(pipeline, make_pdf):
+    path = make_pdf(["alpha beta gamma"], name="report.pdf")
+    pipeline.ingest_file(path)
+    assert pipeline.file_store.read("report.pdf") == path.read_bytes()
+
+
+def test_a_storage_failure_does_not_lose_the_ingested_chunks(pipeline, make_pdf):
+    """Chunks are already searchable by the time the source is stored."""
+    from ragforge.filestore import FileStoreError
+
+    class BrokenStore:
+        location = "broken"
+
+        def save(self, filename, data):
+            raise FileStoreError("disk full")
+
+    pipeline.file_store = BrokenStore()
+    result = pipeline.ingest_file(make_pdf(["alpha beta gamma"]))
+
+    assert result.status == "ingested"
+    assert result.chunk_count > 0
+    assert pipeline.store.count() == result.chunk_count
+    assert "not stored" in result.message
+    assert result.stored_uri == ""
+
+
+def test_a_failed_file_is_never_stored(pipeline, make_pdf):
+    result = pipeline.ingest_file(make_pdf(["", ""], name="scanned.pdf"))
+    assert result.status == "failed"
+    assert not pipeline.file_store.exists("scanned.pdf")
+
+
 def test_reingesting_identical_bytes_with_identical_params_is_skipped(pipeline, make_pdf):
     path = make_pdf(["alpha beta gamma"])
     first = pipeline.ingest_file(path)

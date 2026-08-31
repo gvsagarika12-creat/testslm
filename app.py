@@ -1,6 +1,7 @@
 """Streamlit interface: ingest, inspect, search."""
 from __future__ import annotations
 
+
 import tempfile
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import streamlit as st
 
 from ragforge.config import settings
 from ragforge.pipeline import IngestReport, build_pipeline
-from ragforge.ui_helpers import format_page_range, report_rows
+from ragforge.ui_helpers import format_page_range, pending_uploads, report_rows
 
 st.set_page_config(page_title="RAGForge", layout="wide")
 
@@ -38,36 +39,77 @@ with st.sidebar:
     stats = pipeline.stats()
     st.metric("Documents", stats["documents"])
     st.metric("Chunks", stats["chunks"])
+    st.caption(f"Vectors: {stats['backend']} · {stats['location']}")
+    st.caption(f"Files: {stats['file_store']}")
 
 ingest_tab, inspect_tab, search_tab = st.tabs(["Ingest", "Inspect", "Search"])
 
 with ingest_tab:
     st.subheader("Upload PDFs")
+    st.caption(f"Source files are kept in: `{pipeline.file_store.location}`")
+
+    # Content hashes of uploads already put through the pipeline this session.
+    # Streamlit reruns the whole script on every widget interaction and the
+    # uploader keeps returning its files, so without this the same upload would
+    # be re-ingested on every slider move.
+    if "processed_uploads" not in st.session_state:
+        st.session_state.processed_uploads = set()
+
+    auto_ingest = st.checkbox(
+        "Ingest automatically on upload",
+        value=True,
+        help="Chunk, embed and store each file the moment it arrives.",
+    )
     uploaded = st.file_uploader(
         "Drop PDFs here", type="pdf", accept_multiple_files=True
     )
-    if uploaded and st.button("Ingest uploads", type="primary"):
+
+    pending = pending_uploads(
+        [(item.name, bytes(item.getbuffer())) for item in (uploaded or [])],
+        st.session_state.processed_uploads,
+    )
+
+    if pending:
+        trigger = auto_ingest or st.button(
+            f"Ingest {len(pending)} file(s)", type="primary"
+        )
+    else:
+        trigger = False
+        if uploaded:
+            st.success(f"{len(uploaded)} file(s) already ingested this session.")
+            if st.button("Re-ingest with current settings"):
+                st.session_state.processed_uploads.clear()
+                st.rerun()
+
+    if trigger:
+        results = []
+        progress = st.progress(0.0, text="Starting…")
         with tempfile.TemporaryDirectory() as staging:
-            results = []
-            progress = st.progress(0.0)
-            for index, item in enumerate(uploaded, start=1):
-                staged = Path(staging) / item.name
-                staged.write_bytes(item.getbuffer())
+            for index, (key, filename, data) in enumerate(pending, start=1):
+                progress.progress(
+                    (index - 1) / len(pending),
+                    text=f"Chunking and embedding {filename}…",
+                )
+                staged = Path(staging) / filename
+                staged.write_bytes(data)
                 results.append(
                     pipeline.ingest_file(
                         staged, chunk_size=chunk_size, overlap=overlap, force=force
                     )
                 )
-                progress.progress(index / len(uploaded))
+                # Mark done even on failure, so a broken file cannot cause an
+                # endless re-ingest loop across reruns.
+                st.session_state.processed_uploads.add(key)
+                progress.progress(index / len(pending), text=f"{filename} done")
         st.session_state["last_report"] = report_rows(IngestReport(results=results))
         st.rerun()
 
     if "last_report" in st.session_state:
-        st.dataframe(
-            st.session_state["last_report"],
-            width="stretch",
-            hide_index=True,
-        )
+        rows = st.session_state["last_report"]
+        failures = [r for r in rows if r["Status"] == "failed"]
+        if failures:
+            st.error(f"{len(failures)} file(s) failed. See Detail below.")
+        st.dataframe(rows, width="stretch", hide_index=True)
 
     st.divider()
     st.subheader("Ingest a folder")
