@@ -8,7 +8,9 @@ from pathlib import Path
 import streamlit as st
 
 from ragforge.config import settings
+from ragforge.llm import LLMError
 from ragforge.pipeline import IngestReport, build_pipeline
+from ragforge.teach import VECTORS, Teacher
 from ragforge.ui_helpers import format_page_range, pending_uploads, report_rows
 
 st.set_page_config(page_title="RAGForge", layout="wide")
@@ -18,6 +20,12 @@ st.set_page_config(page_title="RAGForge", layout="wide")
 def get_pipeline():
     """Built once per session — model loading is expensive."""
     return build_pipeline()
+
+
+@st.cache_resource(show_spinner=False)
+def get_teacher():
+    """The 3H layer. Holds no state; safe to reuse across reruns."""
+    return Teacher(pipeline=get_pipeline())
 
 
 pipeline = get_pipeline()
@@ -42,7 +50,9 @@ with st.sidebar:
     st.caption(f"Vectors: {stats['backend']} · {stats['location']}")
     st.caption(f"Files: {stats['file_store']}")
 
-ingest_tab, inspect_tab, search_tab = st.tabs(["Ingest", "Inspect", "Search"])
+ingest_tab, inspect_tab, search_tab, teach_tab = st.tabs(
+    ["Ingest", "Inspect", "Search", "Teach"]
+)
 
 with ingest_tab:
     st.subheader("Upload PDFs")
@@ -170,3 +180,81 @@ with search_tab:
             )
             st.write(hit.text)
             st.divider()
+
+with teach_tab:
+    st.subheader("Teach — 3H")
+    st.caption(
+        f"Answers are written by `{settings.ollama_model}` from retrieved passages "
+        "only. Expect 60–90 seconds."
+    )
+
+    teach_question = st.text_input(
+        "Learner question", key="teach_q",
+        placeholder="How is central retinal artery occlusion treated?",
+    )
+    context_chunks = st.slider(
+        "Passages to teach from", 2, 12, settings.teach_context_chunks
+    )
+
+    if st.button("Teach", type="primary", disabled=not teach_question.strip()):
+        with st.spinner(f"{settings.ollama_model} is reading the passages…"):
+            try:
+                st.session_state["teach_answer"] = get_teacher().answer(
+                    teach_question, k=context_chunks
+                )
+                st.session_state.pop("teach_error", None)
+            except (LLMError, ValueError) as exc:
+                st.session_state["teach_error"] = str(exc)
+                st.session_state.pop("teach_answer", None)
+
+    if st.session_state.get("teach_error"):
+        st.error(st.session_state["teach_error"])
+
+    answer = st.session_state.get("teach_answer")
+    if answer:
+        st.markdown(f"### {answer.topic}")
+
+        for vector in VECTORS:
+            section = answer.sections[vector]
+            st.markdown(f"#### {section.label}")
+            if section.covered and section.content:
+                st.write(section.content)
+                if section.citations:
+                    st.caption("Sources: " + " · ".join(f"`{c}`" for c in section.citations))
+            else:
+                st.info("Not covered by the ingested sources.")
+
+        if answer.unverified_claims:
+            st.warning("**[UNVERIFIED — CONFIRM WITH FACULTY]**")
+            for claim in answer.unverified_claims:
+                st.markdown(f"- {claim}")
+
+        if answer.gap_report:
+            with st.expander(f"Gap report ({len(answer.gap_report)})"):
+                for gap in answer.gap_report:
+                    st.markdown(f"- {gap}")
+
+        if answer.retrieval_question:
+            st.markdown("#### Retrieval check")
+            st.markdown(f"> {answer.retrieval_question}")
+
+        if answer.warnings:
+            with st.expander(f"⚠️ Contract warnings ({len(answer.warnings)})"):
+                for warning in answer.warnings:
+                    st.markdown(f"- {warning}")
+
+        with st.expander(f"Passages this answer was written from ({len(answer.hits)})"):
+            for hit in answer.hits:
+                st.markdown(
+                    f"**{hit.score:.3f}** · `{hit.source_filename}` · "
+                    f"{format_page_range(hit.page_start, hit.page_end)}"
+                )
+                st.write(hit.text)
+                st.divider()
+
+        if answer.llm:
+            st.caption(
+                f"{answer.llm.output_tokens} tokens in "
+                f"{answer.llm.duration_seconds:.1f}s "
+                f"({answer.llm.tokens_per_second:.1f} tok/s)"
+            )

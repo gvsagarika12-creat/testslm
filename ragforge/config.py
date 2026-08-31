@@ -33,6 +33,19 @@ class Settings(BaseSettings):
     # without the pipeline changing; see ragforge/filestore.py.
     file_store_backend: Literal["local"] = "local"
 
+    # Generation. The 3H teaching layer runs against an Ollama endpoint.
+    ollama_base_url: str = "https://ollama.dinokage.in"
+    ollama_model: str = "gemma4:12b"
+    # A 12B model at ~29 tok/s takes 60-90s for a full 3H answer; the default
+    # allows for a cold model load on top of that.
+    ollama_timeout_seconds: int = 300
+    # 0.0 for reproducibility. The model's vector-coverage judgement drifts
+    # between runs at higher temperatures — the same question can report HEART
+    # covered on one call and uncovered on the next.
+    ollama_temperature: float = 0.0
+    teach_context_chunks: int = 6
+    prompts_dir: Path = PROJECT_ROOT / "prompts"
+
     store_backend: Literal["postgres", "chroma"] = "postgres"
     database_url: str = "postgresql://ragforge:ragforge@127.0.0.1:5432/ragforge"
     # Must equal the embedding model's output size and the vector(N) column.
