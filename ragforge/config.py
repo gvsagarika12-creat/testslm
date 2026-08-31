@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,6 +26,17 @@ class Settings(BaseSettings):
     embed_batch_size: int = 32
     collection_name: str = "documents"
     data_dir: Path = PROJECT_ROOT / "data"
+
+    # Which vector store backs the corpus. "postgres" is the default; "chroma"
+    # remains available as a no-server fallback for anyone without Docker.
+    # Where uploaded source files are kept. "ftp" and friends slot in here
+    # without the pipeline changing; see ragforge/filestore.py.
+    file_store_backend: Literal["local"] = "local"
+
+    store_backend: Literal["postgres", "chroma"] = "postgres"
+    database_url: str = "postgresql://ragforge:ragforge@127.0.0.1:5432/ragforge"
+    # Must equal the embedding model's output size and the vector(N) column.
+    embedding_dimension: int = 384
 
     @field_validator("chunk_size", "chunk_overlap", "embed_batch_size")
     @classmethod

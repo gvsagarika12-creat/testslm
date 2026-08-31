@@ -1,0 +1,29 @@
+# PostgreSQL with pgvector, for the RAGForge vector store.
+#
+#   docker compose up -d      start it
+#   docker compose down       stop it (data is kept)
+#   docker compose down -v    stop it and DELETE all stored vectors
+#
+# Bound to 127.0.0.1 so the database is reachable only from this machine.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ragforge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ragforge
+      POSTGRES_PASSWORD: ragforge
+      POSTGRES_DB: ragforge
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - ragforge_pgdata:/var/lib/postgresql/data
+      - ./sql/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ragforge -d ragforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  ragforge_pgdata:
