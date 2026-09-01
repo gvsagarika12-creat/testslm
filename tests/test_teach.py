@@ -339,13 +339,19 @@ def test_unexercised_vectors_are_marked_not_assessed():
 
 
 def test_scores_are_clamped_to_the_zero_to_four_anchors():
+    """The section 8 anchors run 0-4; anything else is a model error."""
     result = assess(grading(scores=[score(level=9), score("hands", level=-3)]))
-    assert [s.level for s in result.scores] == [4, 0]
+    levels = {s.vector: s.level for s in result.scores}
+    assert levels["head"] == 4
+    assert levels["hands"] == 0
 
 
 def test_scores_with_an_unknown_vector_are_dropped():
+    """An invented vector is discarded; the real ones are still all reported."""
     result = assess(grading(scores=[score("spleen"), score("head")]))
-    assert [s.vector for s in result.scores] == ["head"]
+    assert [s.vector for s in result.scores] == ["head", "heart", "hands"]
+    assert next(s for s in result.scores if s.vector == "head").assessed is True
+    assert next(s for s in result.scores if s.vector == "heart").assessed is False
 
 
 def test_feedback_fields_are_carried_through():
@@ -419,3 +425,25 @@ def test_malformed_grading_does_not_crash():
     assert result.scores == []
     assert result.what_was_right == []
     assert result.needs_faculty_review is True
+
+
+def test_a_vector_the_model_omits_is_reported_unassessed():
+    """Section 7 MODE 4: report all three, always. A dropped vector must not vanish."""
+    result = assess(grading(scores=[score("head"), score("heart")]))
+    assert [s.vector for s in result.scores] == ["head", "heart", "hands"]
+    hands = next(s for s in result.scores if s.vector == "hands")
+    assert hands.assessed is False
+    assert any("HANDS" in w for w in result.warnings)
+
+
+def test_more_than_two_correction_targets_are_capped():
+    """Section 7 MODE 5: max 2 per feedback event, even if more errors exist."""
+    result = assess(grading(what_was_missed=["one", "two", "three", "four"]))
+    assert result.what_was_missed == ["one", "two"]
+    assert any("correction targets" in w for w in result.warnings)
+
+
+def test_two_correction_targets_pass_untouched():
+    result = assess(grading(what_was_missed=["one", "two"]))
+    assert result.what_was_missed == ["one", "two"]
+    assert not any("correction targets" in w for w in result.warnings)

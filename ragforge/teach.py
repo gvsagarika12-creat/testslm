@@ -14,6 +14,7 @@ from typing import Sequence
 
 from ragforge.config import Settings, settings as default_settings
 from ragforge.llm import LLMError, LLMResponse, OllamaClient
+from ragforge.prompts import build_system_prompt
 from ragforge.store import Hit
 
 VECTORS = ("head", "heart", "hands")
@@ -221,6 +222,101 @@ class Assessment:
         return [s for s in self.scores if s.assessed]
 
 
+def parse_assessment(
+    parsed: dict, *, question: str, learner_answer: str, allowed: set[str], meta=None
+) -> Assessment:
+    """Turn a graded reply into an Assessment, verifying its citations.
+
+    Shared by the single-question path and the case debrief, so both are held
+    to the same grounding checks and the same §8 clamping.
+    """
+    kept, dropped = [], []
+    for citation in parsed.get("citations") or []:
+        normalized = _normalize_citation(str(citation))
+        if not normalized:
+            continue
+        (kept if normalized in allowed else dropped).append(normalized)
+
+    scores = []
+    for raw in parsed.get("scores") or []:
+        if not isinstance(raw, dict):
+            continue
+        vector = str(raw.get("vector") or "").strip().lower()
+        if vector not in VECTORS:
+            continue
+        try:
+            level = int(raw.get("level") or 0)
+        except (TypeError, ValueError):
+            level = 0
+        scores.append(
+            VectorScore(
+                vector=vector,
+                assessed=bool(raw.get("assessed")),
+                # §8 anchors run 0-4; anything outside is a model error, not a scale.
+                level=max(0, min(4, level)),
+                anchor=(raw.get("anchor") or "").strip(),
+                evidence=(raw.get("evidence") or "").strip(),
+            )
+        )
+    scores.sort(key=lambda s: VECTORS.index(s.vector))
+
+    warnings = []
+
+    # §7 MODE 4: "Report all three, always." A vector the model simply omitted
+    # would otherwise vanish from the report and read as if it had not applied.
+    scored_vectors = {s.vector for s in scores}
+    missing = [v for v in VECTORS if v not in scored_vectors]
+    if missing and scores:
+        warnings.append(
+            "not scored by the model, reported as unassessed — "
+            + ", ".join(v.upper() for v in missing)
+        )
+        scores.extend(
+            VectorScore(vector=v, assessed=False, level=0, anchor="", evidence="")
+            for v in missing
+        )
+        scores.sort(key=lambda s: VECTORS.index(s.vector))
+
+    # §7 MODE 5: max 2 correction targets per feedback event, "even if more
+    # errors exist" — the cap is a cognitive-load rule, not a formatting one.
+    what_was_missed = [
+        str(x).strip() for x in (parsed.get("what_was_missed") or []) if str(x).strip()
+    ]
+    if len(what_was_missed) > 2:
+        warnings.append(
+            f"{len(what_was_missed)} correction targets returned; showing the "
+            "first 2 per the max-2 rule"
+        )
+        what_was_missed = what_was_missed[:2]
+
+    if dropped:
+        warnings.append(
+            "discarded citation(s) not in the retrieved passages — " + ", ".join(dropped)
+        )
+    if parsed.get("model_answer") and not kept:
+        warnings.append("the model answer carries no citation traceable to the passages")
+
+    return Assessment(
+        question=question,
+        learner_answer=learner_answer,
+        verdict=str(parsed.get("verdict") or "partially_correct"),
+        scores=scores,
+        acknowledgement=(parsed.get("acknowledgement") or "").strip(),
+        what_was_right=[
+            str(x).strip() for x in (parsed.get("what_was_right") or []) if str(x).strip()
+        ],
+        what_was_missed=what_was_missed,
+        model_answer=(parsed.get("model_answer") or "").strip(),
+        citations=kept,
+        dropped_citations=dropped,
+        feed_forward=(parsed.get("feed_forward") or "").strip(),
+        # Absent confidence must escalate, not pass silently as trustworthy.
+        grader_confidence=str(parsed.get("grader_confidence") or "low"),
+        warnings=warnings,
+        llm=meta,
+    )
+
+
 def load_system_prompt(config: Settings | None = None) -> str:
     """The 3H spec plus the deployment addendum, concatenated."""
     config = config or default_settings
@@ -301,7 +397,7 @@ class Teacher:
         )
 
         parsed, meta = self.client.chat_json(
-            system=load_system_prompt(self.config),
+            system=build_system_prompt("teach", self.config),
             user=user_message,
             schema=TEACH_SCHEMA,
         )
@@ -355,66 +451,16 @@ class Teacher:
         )
 
         parsed, meta = self.client.chat_json(
-            system=load_system_prompt(self.config),
+            system=build_system_prompt("assess", self.config),
             user=user_message,
             schema=ASSESS_SCHEMA,
         )
-
-        kept, dropped = [], []
-        for citation in parsed.get("citations") or []:
-            normalized = _normalize_citation(str(citation))
-            if not normalized:
-                continue
-            (kept if normalized in allowed else dropped).append(normalized)
-
-        scores = []
-        for raw in parsed.get("scores") or []:
-            if not isinstance(raw, dict):
-                continue
-            vector = str(raw.get("vector") or "").strip().lower()
-            if vector not in VECTORS:
-                continue
-            scores.append(
-                VectorScore(
-                    vector=vector,
-                    assessed=bool(raw.get("assessed")),
-                    level=max(0, min(4, int(raw.get("level") or 0))),
-                    anchor=(raw.get("anchor") or "").strip(),
-                    evidence=(raw.get("evidence") or "").strip(),
-                )
-            )
-        scores.sort(key=lambda s: VECTORS.index(s.vector))
-
-        warnings = []
-        if dropped:
-            warnings.append(
-                "discarded citation(s) not in the retrieved passages — "
-                + ", ".join(dropped)
-            )
-        if parsed.get("model_answer") and not kept:
-            warnings.append(
-                "the model answer carries no citation traceable to the passages"
-            )
-
-        return Assessment(
+        return parse_assessment(
+            parsed,
             question=retrieval_question.strip(),
             learner_answer=learner_answer.strip(),
-            verdict=str(parsed.get("verdict") or "partially_correct"),
-            scores=scores,
-            acknowledgement=(parsed.get("acknowledgement") or "").strip(),
-            what_was_right=[
-                str(x).strip() for x in (parsed.get("what_was_right") or []) if str(x).strip()
-            ],
-            what_was_missed=[
-                str(x).strip() for x in (parsed.get("what_was_missed") or []) if str(x).strip()
-            ],
-            model_answer=(parsed.get("model_answer") or "").strip(),
-            citations=kept,
-            dropped_citations=dropped,
-            feed_forward=(parsed.get("feed_forward") or "").strip(),
-            grader_confidence=str(parsed.get("grader_confidence") or "low"),
-            warnings=warnings,
-            llm=meta,
+            allowed=allowed,
+            meta=meta,
         )
 
     def _build_answer(self, question, parsed, cards, warnings, hits, meta) -> TeachAnswer:

@@ -10,6 +10,7 @@ import streamlit as st
 from ragforge.config import settings
 from ragforge.llm import LLMError
 from ragforge.pipeline import IngestReport, build_pipeline
+from ragforge.simulate import Simulator
 from ragforge.teach import VECTOR_BADGES, VECTORS, Teacher
 from ragforge.ui_helpers import format_page_range, pending_uploads, report_rows
 
@@ -31,6 +32,11 @@ def get_teacher():
     edited method appears missing until the whole app is restarted.
     """
     return Teacher(pipeline=get_pipeline())
+
+
+def get_simulator():
+    """The case simulator. Not cached, for the same reason as get_teacher."""
+    return Simulator(pipeline=get_pipeline())
 
 
 pipeline = get_pipeline()
@@ -55,8 +61,8 @@ with st.sidebar:
     st.caption(f"Vectors: {stats['backend']} · {stats['location']}")
     st.caption(f"Files: {stats['file_store']}")
 
-ingest_tab, inspect_tab, search_tab, teach_tab = st.tabs(
-    ["Ingest", "Inspect", "Search", "Teach"]
+ingest_tab, inspect_tab, search_tab, teach_tab, sim_tab = st.tabs(
+    ["Ingest", "Inspect", "Search", "Teach", "Simulate"]
 )
 
 with ingest_tab:
@@ -362,3 +368,125 @@ with teach_tab:
                 f"{answer.llm.duration_seconds:.1f}s "
                 f"({answer.llm.tokens_per_second:.1f} tok/s)"
             )
+
+with sim_tab:
+    st.subheader("Simulate — a case, scored on all three vectors")
+    st.caption(
+        "A three-scene case: reasoning, then the patient's distress, then "
+        "management. HEART is scored from what you actually say to the patient — "
+        "which a factual question can never measure."
+    )
+
+    case = st.session_state.get("case")
+
+    if case is None:
+        topic = st.text_input(
+            "Case topic", key="case_topic",
+            placeholder="central retinal artery occlusion",
+        )
+        if st.button("Start case", type="primary", disabled=not topic.strip()):
+            with st.spinner("Building the case…"):
+                try:
+                    st.session_state["case"] = get_simulator().start(topic)
+                    st.session_state.pop("case_error", None)
+                    st.rerun()
+                except (LLMError, ValueError) as exc:
+                    st.session_state["case_error"] = str(exc)
+        if st.session_state.get("case_error"):
+            st.error(st.session_state["case_error"])
+
+    else:
+        header, control = st.columns([5, 1])
+        header.markdown(f"### {case.title}")
+        if control.button("End case"):
+            for key in ("case", "case_error"):
+                st.session_state.pop(key, None)
+            st.rerun()
+
+        st.write(case.presentation)
+        st.markdown(f"*The patient: {case.persona}*")
+        if case.citations:
+            st.caption("Sources: " + " · ".join(f"`{c}`" for c in case.citations))
+
+        for turn in case.turns:
+            with st.container(border=True):
+                st.markdown(f"**{VECTOR_BADGES[turn.scene.vector]} · scene "
+                            f"{turn.scene.index + 1}**")
+                st.write(turn.scene.situation)
+                st.caption(turn.scene.prompt)
+                st.markdown(f"> {turn.learner_reply}")
+                if turn.reaction:
+                    st.write(turn.reaction)
+
+        if not case.finished:
+            scene = case.scene
+            with st.container(border=True):
+                st.markdown(f"**{VECTOR_BADGES[scene.vector]} · scene "
+                            f"{scene.index + 1} of 3**")
+                st.write(scene.situation)
+                st.markdown(f"**{scene.prompt}**")
+                reply = st.text_area(
+                    "Your response", key=f"scene_{scene.index}", height=110
+                )
+                if st.button("Respond", type="primary", disabled=not reply.strip()):
+                    with st.spinner("…"):
+                        try:
+                            st.session_state["case"] = get_simulator().respond(case, reply)
+                            st.rerun()
+                        except (LLMError, ValueError) as exc:
+                            st.error(str(exc))
+
+        elif case.debrief is None:
+            st.success("All three scenes complete.")
+            if st.button("Score this case", type="primary"):
+                with st.spinner("Scoring against the §8 anchors…"):
+                    try:
+                        get_simulator().score(case)
+                        st.session_state["case"] = case
+                        st.rerun()
+                    except (LLMError, ValueError) as exc:
+                        st.error(str(exc))
+
+        if case.debrief:
+            d = case.debrief
+            st.markdown("### Debrief")
+            with st.container(border=True):
+                {"correct": st.success, "partially_correct": st.warning,
+                 "incorrect": st.error}.get(d.verdict, st.info)(f"**{d.verdict_label}**")
+
+                if d.acknowledgement:
+                    st.write(d.acknowledgement)
+
+                columns = st.columns(3)
+                for column, s in zip(columns, d.scores):
+                    column.metric(s.badge, f"{s.level}/4", s.anchor)
+                for s in d.scores:
+                    if s.evidence:
+                        st.caption(f"**{s.badge}** — your words: “{s.evidence}”")
+
+                if d.what_was_right:
+                    st.markdown("**What you did well**")
+                    for point in d.what_was_right:
+                        st.markdown(f"- {point}")
+                if d.what_was_missed:
+                    st.markdown("**What was missing**")
+                    for point in d.what_was_missed:
+                        st.markdown(f"- {point}")
+                if d.model_answer:
+                    st.markdown("**How a strong learner handles this case**")
+                    st.write(d.model_answer)
+                    if d.citations:
+                        st.caption("Sources: " + " · ".join(f"`{c}`" for c in d.citations))
+                if d.feed_forward:
+                    st.markdown(f"**Next:** {d.feed_forward}")
+                if d.needs_faculty_review:
+                    st.warning("🚩 **FACULTY REVIEW** — the grader was not confident.")
+                if d.warnings:
+                    with st.expander("⚠️ Grading warnings"):
+                        for warning in d.warnings:
+                            st.markdown(f"- {warning}")
+
+        if case.warnings:
+            with st.expander(f"⚠️ Case warnings ({len(case.warnings)})"):
+                for warning in case.warnings:
+                    st.markdown(f"- {warning}")
