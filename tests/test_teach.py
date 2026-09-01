@@ -287,3 +287,135 @@ def test_missing_prompt_directory_is_a_clear_error(tmp_path):
     config = Settings(data_dir=tmp_path / "d", prompts_dir=tmp_path / "nope")
     with pytest.raises(FileNotFoundError, match="missing prompt file"):
         load_system_prompt(config)
+
+
+# --- assessment (MODE 4 -> MODE 5) ------------------------------------------
+
+
+def score(vector="head", assessed=True, level=3, anchor="Relational", evidence="x"):
+    return {"vector": vector, "assessed": assessed, "level": level,
+            "anchor": anchor, "evidence": evidence}
+
+
+def grading(**overrides):
+    base = {
+        "verdict": "partially_correct",
+        "scores": [score("head"), score("heart", assessed=False, level=0, anchor="", evidence=""),
+                   score("hands", level=2, anchor="Knows How")],
+        "acknowledgement": "You correctly identified the mechanism.",
+        "what_was_right": ["Named the blockage as arterial."],
+        "what_was_missed": ["The 4-6 hour window."],
+        "model_answer": "Acute treatment must begin within 4 to 6 hours.",
+        "citations": ["crao.pdf p3-4"],
+        "feed_forward": "Before the next case, state the time window aloud.",
+        "grader_confidence": "high",
+    }
+    base.update(overrides)
+    return base
+
+
+def assess(payload=None, learner="within six hours", hits=None):
+    client = FakeClient(payload if payload is not None else grading())
+    teacher = Teacher(FakePipeline(hits), client)
+    return teacher.assess("What is the time window?", learner, hits if hits is not None else HITS)
+
+
+def test_assessment_returns_a_verdict():
+    assert assess().verdict == "partially_correct"
+
+
+def test_verdict_has_a_readable_label():
+    assert assess(grading(verdict="incorrect")).verdict_label == "Not yet"
+
+
+def test_all_three_vectors_are_scored():
+    """MODE 4: never collapse the vectors; report all three."""
+    assert [s.vector for s in assess().scores] == ["head", "heart", "hands"]
+
+
+def test_unexercised_vectors_are_marked_not_assessed():
+    result = assess()
+    assert [s.vector for s in result.assessed_scores] == ["head", "hands"]
+
+
+def test_scores_are_clamped_to_the_zero_to_four_anchors():
+    result = assess(grading(scores=[score(level=9), score("hands", level=-3)]))
+    assert [s.level for s in result.scores] == [4, 0]
+
+
+def test_scores_with_an_unknown_vector_are_dropped():
+    result = assess(grading(scores=[score("spleen"), score("head")]))
+    assert [s.vector for s in result.scores] == ["head"]
+
+
+def test_feedback_fields_are_carried_through():
+    result = assess()
+    assert result.acknowledgement.startswith("You correctly")
+    assert result.what_was_right == ["Named the blockage as arterial."]
+    assert result.what_was_missed == ["The 4-6 hour window."]
+    assert result.feed_forward.startswith("Before the next case")
+
+
+def test_the_model_answer_is_returned():
+    assert "4 to 6 hours" in assess().model_answer
+
+
+def test_invented_citations_in_grading_are_discarded():
+    result = assess(grading(citations=["crao.pdf p1", "fake.pdf p2"]))
+    assert result.citations == ["crao.pdf p1"]
+    assert result.dropped_citations == ["fake.pdf p2"]
+    assert any("fake.pdf p2" in w for w in result.warnings)
+
+
+def test_an_uncited_model_answer_is_flagged():
+    result = assess(grading(citations=[]))
+    assert any("no citation traceable" in w for w in result.warnings)
+
+
+def test_low_grader_confidence_escalates_to_faculty():
+    """Section 10: low confidence routes to human review."""
+    assert assess(grading(grader_confidence="low")).needs_faculty_review is True
+
+
+def test_high_confidence_does_not_escalate():
+    assert assess().needs_faculty_review is False
+
+
+def test_a_missing_confidence_defaults_to_low():
+    """Absent confidence must escalate, not silently pass as trustworthy."""
+    payload = grading()
+    del payload["grader_confidence"]
+    assert assess(payload).needs_faculty_review is True
+
+
+def test_an_empty_learner_answer_is_rejected():
+    with pytest.raises(ValueError, match="answer is required"):
+        Teacher(FakePipeline(), FakeClient()).assess("q", "   ", HITS)
+
+
+def test_grading_without_passages_is_refused():
+    with pytest.raises(LLMError, match="without the passages"):
+        Teacher(FakePipeline(), FakeClient()).assess("q", "an answer", [])
+
+
+def test_the_learner_answer_reaches_the_model():
+    client = FakeClient(grading())
+    Teacher(FakePipeline(), client).assess("What window?", "six hours", HITS)
+    assert "six hours" in client.user
+    assert "What window?" in client.user
+    assert "ocular massage" in client.user, "grading must see the same passages"
+
+
+def test_grading_uses_the_assessment_schema():
+    from ragforge.teach import ASSESS_SCHEMA
+
+    client = FakeClient(grading())
+    Teacher(FakePipeline(), client).assess("q", "a", HITS)
+    assert client.schema == ASSESS_SCHEMA
+
+
+def test_malformed_grading_does_not_crash():
+    result = assess({"verdict": "correct"})
+    assert result.scores == []
+    assert result.what_was_right == []
+    assert result.needs_faculty_review is True

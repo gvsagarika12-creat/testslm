@@ -59,6 +59,48 @@ TEACH_SCHEMA = {
 }
 
 
+_SCORE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "vector": {"type": "string", "enum": list(VECTORS)},
+        "assessed": {"type": "boolean"},
+        "level": {"type": "integer", "minimum": 0, "maximum": 4},
+        "anchor": {"type": "string"},
+        "evidence": {"type": "string"},
+    },
+    "required": ["vector", "assessed", "level", "anchor", "evidence"],
+}
+
+ASSESS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["correct", "partially_correct", "incorrect"],
+        },
+        "scores": {"type": "array", "items": _SCORE_SCHEMA},
+        "acknowledgement": {"type": "string"},
+        "what_was_right": {"type": "array", "items": {"type": "string"}},
+        "what_was_missed": {"type": "array", "items": {"type": "string"}},
+        "model_answer": {"type": "string"},
+        "citations": {"type": "array", "items": {"type": "string"}},
+        "feed_forward": {"type": "string"},
+        "grader_confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    },
+    "required": [
+        "verdict", "scores", "acknowledgement", "what_was_right",
+        "what_was_missed", "model_answer", "citations", "feed_forward",
+        "grader_confidence",
+    ],
+}
+
+VERDICT_LABELS = {
+    "correct": "Correct",
+    "partially_correct": "Partially correct",
+    "incorrect": "Not yet",
+}
+
+
 def citation_label(hit: Hit) -> str:
     """The label a passage is cited by: "ram.pdf p5" or "ram.pdf p5-7"."""
     if hit.page_start == hit.page_end:
@@ -133,6 +175,50 @@ class TeachAnswer:
                 if citation not in seen:
                     seen.append(citation)
         return seen
+
+
+@dataclass
+class VectorScore:
+    vector: str
+    assessed: bool
+    level: int
+    anchor: str
+    evidence: str
+
+    @property
+    def badge(self) -> str:
+        return VECTOR_BADGES[self.vector]
+
+
+@dataclass
+class Assessment:
+    question: str
+    learner_answer: str
+    verdict: str
+    scores: list[VectorScore]
+    acknowledgement: str
+    what_was_right: list[str]
+    what_was_missed: list[str]
+    model_answer: str
+    citations: list[str]
+    dropped_citations: list[str]
+    feed_forward: str
+    grader_confidence: str
+    warnings: list[str] = field(default_factory=list)
+    llm: LLMResponse | None = None
+
+    @property
+    def verdict_label(self) -> str:
+        return VERDICT_LABELS.get(self.verdict, self.verdict)
+
+    @property
+    def needs_faculty_review(self) -> bool:
+        """§10: low grading confidence escalates to a human."""
+        return self.grader_confidence == "low"
+
+    @property
+    def assessed_scores(self) -> list[VectorScore]:
+        return [s for s in self.scores if s.assessed]
 
 
 def load_system_prompt(config: Settings | None = None) -> str:
@@ -245,6 +331,93 @@ class Teacher:
                     f"traceable to the retrieved passages"
                 )
 
+        return self._build_answer(question, parsed, cards, warnings, hits, meta)
+
+    def assess(
+        self, retrieval_question: str, learner_answer: str, hits: Sequence[Hit]
+    ) -> Assessment:
+        """Grade a learner's answer against the passages the question came from.
+
+        `hits` are the passages that produced the question, so the grading and
+        the model answer are held to exactly the same sources the teaching was.
+        """
+        if not learner_answer.strip():
+            raise ValueError("an answer is required")
+        if not hits:
+            raise LLMError("cannot grade without the passages the question came from")
+
+        allowed = {citation_label(h) for h in hits}
+        user_message = (
+            f"CONTEXT:\n{build_context(hits)}\n\n"
+            f"QUESTION PUT TO THE LEARNER: {retrieval_question.strip()}\n\n"
+            f"THE LEARNER'S ANSWER:\n{learner_answer.strip()}\n\n"
+            "Grade this answer, then give feedback."
+        )
+
+        parsed, meta = self.client.chat_json(
+            system=load_system_prompt(self.config),
+            user=user_message,
+            schema=ASSESS_SCHEMA,
+        )
+
+        kept, dropped = [], []
+        for citation in parsed.get("citations") or []:
+            normalized = _normalize_citation(str(citation))
+            if not normalized:
+                continue
+            (kept if normalized in allowed else dropped).append(normalized)
+
+        scores = []
+        for raw in parsed.get("scores") or []:
+            if not isinstance(raw, dict):
+                continue
+            vector = str(raw.get("vector") or "").strip().lower()
+            if vector not in VECTORS:
+                continue
+            scores.append(
+                VectorScore(
+                    vector=vector,
+                    assessed=bool(raw.get("assessed")),
+                    level=max(0, min(4, int(raw.get("level") or 0))),
+                    anchor=(raw.get("anchor") or "").strip(),
+                    evidence=(raw.get("evidence") or "").strip(),
+                )
+            )
+        scores.sort(key=lambda s: VECTORS.index(s.vector))
+
+        warnings = []
+        if dropped:
+            warnings.append(
+                "discarded citation(s) not in the retrieved passages — "
+                + ", ".join(dropped)
+            )
+        if parsed.get("model_answer") and not kept:
+            warnings.append(
+                "the model answer carries no citation traceable to the passages"
+            )
+
+        return Assessment(
+            question=retrieval_question.strip(),
+            learner_answer=learner_answer.strip(),
+            verdict=str(parsed.get("verdict") or "partially_correct"),
+            scores=scores,
+            acknowledgement=(parsed.get("acknowledgement") or "").strip(),
+            what_was_right=[
+                str(x).strip() for x in (parsed.get("what_was_right") or []) if str(x).strip()
+            ],
+            what_was_missed=[
+                str(x).strip() for x in (parsed.get("what_was_missed") or []) if str(x).strip()
+            ],
+            model_answer=(parsed.get("model_answer") or "").strip(),
+            citations=kept,
+            dropped_citations=dropped,
+            feed_forward=(parsed.get("feed_forward") or "").strip(),
+            grader_confidence=str(parsed.get("grader_confidence") or "low"),
+            warnings=warnings,
+            llm=meta,
+        )
+
+    def _build_answer(self, question, parsed, cards, warnings, hits, meta) -> TeachAnswer:
         return TeachAnswer(
             question=question.strip(),
             title=(parsed.get("title") or question).strip(),

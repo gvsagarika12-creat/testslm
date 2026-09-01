@@ -114,3 +114,66 @@ def test_an_unanswerable_question_still_stays_grounded(teacher):
     for c in result.cards:
         for citation in c.citations:
             assert citation in allowed
+
+
+# --- assessment against the real model --------------------------------------
+
+@pytest.fixture(scope="module")
+def graded(teacher, answer):
+    """A deliberately partial answer, graded by the real model."""
+    return teacher.assess(
+        answer.retrieval_question,
+        "I think you have to treat it quickly, within a few hours.",
+        answer.hits,
+    )
+
+
+def test_grading_returns_a_known_verdict(graded):
+    assert graded.verdict in {"correct", "partially_correct", "incorrect"}
+
+
+def test_grading_scores_every_vector(graded):
+    assert {s.vector for s in graded.scores} == set(VECTORS)
+
+
+def test_scored_levels_are_within_the_anchors(graded):
+    for s in graded.scores:
+        assert 0 <= s.level <= 4
+
+
+def test_an_assessed_vector_quotes_the_learner(graded):
+    for s in graded.assessed_scores:
+        assert s.evidence.strip(), f"{s.vector} scored without citing the learner"
+
+
+def test_grading_acknowledges_before_correcting(graded):
+    """MODE 5 step 1: a specific acknowledgment comes first."""
+    assert graded.acknowledgement.strip()
+
+
+def test_at_most_two_correction_targets(graded):
+    """MODE 5: max 2 correction targets per feedback event."""
+    assert len(graded.what_was_missed) <= 2
+
+
+def test_it_supplies_the_answer(graded):
+    assert len(graded.model_answer.split()) >= 10
+
+
+def test_the_model_answer_is_grounded(graded, answer):
+    """Grading is held to the same passages the question was taught from."""
+    allowed = {citation_label(h) for h in answer.hits}
+    for citation in graded.citations:
+        assert citation in allowed
+
+
+def test_grading_invents_no_citations(graded):
+    assert not graded.dropped_citations, f"invented: {graded.dropped_citations}"
+
+
+def test_it_gives_one_next_action(graded):
+    assert graded.feed_forward.strip()
+
+
+def test_it_states_its_confidence(graded):
+    assert graded.grader_confidence in {"high", "medium", "low"}

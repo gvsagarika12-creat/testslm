@@ -203,6 +203,9 @@ with teach_tab:
                     teach_question, k=context_chunks
                 )
                 st.session_state.pop("teach_error", None)
+                # A new question means the previous grading no longer applies.
+                st.session_state.pop("assessment", None)
+                st.session_state.pop("assess_error", None)
             except (LLMError, ValueError) as exc:
                 st.session_state["teach_error"] = str(exc)
                 st.session_state.pop("teach_answer", None)
@@ -242,6 +245,83 @@ with teach_tab:
 
         if answer.retrieval_question:
             st.info(f"**{answer.retrieval_question}**")
+
+            learner_answer = st.text_area(
+                "Your answer", key="learner_answer", height=100,
+                placeholder="Answer in your own words — then submit for grading.",
+            )
+            if st.button(
+                "Submit answer", disabled=not learner_answer.strip(), key="submit_answer"
+            ):
+                with st.spinner("Grading your answer…"):
+                    try:
+                        st.session_state["assessment"] = get_teacher().assess(
+                            answer.retrieval_question, learner_answer, answer.hits
+                        )
+                        st.session_state.pop("assess_error", None)
+                    except (LLMError, ValueError) as exc:
+                        st.session_state["assess_error"] = str(exc)
+                        st.session_state.pop("assessment", None)
+
+            if st.session_state.get("assess_error"):
+                st.error(st.session_state["assess_error"])
+
+            assessment = st.session_state.get("assessment")
+            if assessment:
+                with st.container(border=True):
+                    verdict_style = {
+                        "correct": st.success,
+                        "partially_correct": st.warning,
+                        "incorrect": st.error,
+                    }.get(assessment.verdict, st.info)
+                    verdict_style(f"**{assessment.verdict_label}**")
+
+                    if assessment.acknowledgement:
+                        st.write(assessment.acknowledgement)
+
+                    if assessment.assessed_scores:
+                        columns = st.columns(len(assessment.assessed_scores))
+                        for column, score in zip(columns, assessment.assessed_scores):
+                            column.metric(score.badge, f"{score.level}/4", score.anchor)
+
+                    if assessment.what_was_right:
+                        st.markdown("**What you got right**")
+                        for point in assessment.what_was_right:
+                            st.markdown(f"- {point}")
+
+                    if assessment.what_was_missed:
+                        st.markdown("**What was missing**")
+                        for point in assessment.what_was_missed:
+                            st.markdown(f"- {point}")
+
+                    if assessment.model_answer:
+                        st.markdown("**The answer**")
+                        st.write(assessment.model_answer)
+                        if assessment.citations:
+                            st.caption(
+                                "Sources: "
+                                + " · ".join(f"`{c}`" for c in assessment.citations)
+                            )
+
+                    if assessment.feed_forward:
+                        st.markdown(f"**Next:** {assessment.feed_forward}")
+
+                    if assessment.needs_faculty_review:
+                        st.warning(
+                            "🚩 **FACULTY REVIEW** — the grader was not confident "
+                            "in this assessment."
+                        )
+
+                    if assessment.warnings:
+                        with st.expander("⚠️ Grading warnings"):
+                            for warning in assessment.warnings:
+                                st.markdown(f"- {warning}")
+
+                    if assessment.llm:
+                        st.caption(
+                            f"graded in {assessment.llm.duration_seconds:.0f}s · "
+                            f"confidence {assessment.grader_confidence}"
+                        )
 
         if answer.sources:
             st.caption("Sources: " + " · ".join(f"`{s}`" for s in answer.sources))

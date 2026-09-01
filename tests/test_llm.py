@@ -10,26 +10,38 @@ from ragforge.llm import LLMError, OllamaClient
 SCHEMA = {"type": "object", "properties": {"a": {"type": "string"}}}
 
 
-def fake_urlopen(monkeypatch, body, capture=None):
-    """Patch urlopen to return `body`, optionally recording the request."""
+def fake_urlopen(monkeypatch, chunks, capture=None):
+    """Patch urlopen to return an NDJSON stream, recording the request."""
+    ndjson = b"".join(json.dumps(c).encode() + b"\n" for c in chunks)
+
     def _open(request, timeout=None):
         if capture is not None:
             capture["request"] = request
             capture["timeout"] = timeout
-        return io.BytesIO(json.dumps(body).encode())
+        return io.BytesIO(ndjson)
 
     monkeypatch.setattr("urllib.request.urlopen", _open)
 
 
 def ok_body(content='{"a": "b"}', **extra):
-    body = {
-        "message": {"role": "assistant", "content": content, "thinking": "hmm"},
+    """A streamed reply: content split across chunks, then a final done chunk.
+
+    Ollama streams newline-delimited JSON, so the client must reassemble the
+    content rather than read one object.
+    """
+    midpoint = len(content) // 2
+    final = {
+        "message": {"role": "assistant", "content": content[midpoint:], "thinking": ""},
+        "done": True,
         "prompt_eval_count": 120,
         "eval_count": 45,
         "total_duration": 3_000_000_000,
     }
-    body.update(extra)
-    return body
+    final.update(extra)
+    return [
+        {"message": {"content": content[:midpoint], "thinking": "hmm"}, "done": False},
+        final,
+    ]
 
 
 @pytest.fixture
@@ -64,6 +76,26 @@ def test_thinking_is_captured_separately(monkeypatch, client):
     assert "hmm" not in meta.content
 
 
+def test_content_split_across_chunks_is_reassembled(monkeypatch, client):
+    """The whole point of streaming: the JSON arrives in pieces."""
+    fake_urlopen(monkeypatch, [
+        {"message": {"content": '{"a":'}, "done": False},
+        {"message": {"content": ' "spl'}, "done": False},
+        {"message": {"content": 'it"}'}, "done": True, "eval_count": 3},
+    ])
+    parsed, _ = client.chat_json("sys", "usr", SCHEMA)
+    assert parsed == {"a": "split"}
+
+
+def test_an_error_chunk_mid_stream_is_raised(monkeypatch, client):
+    fake_urlopen(monkeypatch, [
+        {"message": {"content": "{"}, "done": False},
+        {"error": "model not found"},
+    ])
+    with pytest.raises(LLMError, match="model not found"):
+        client.chat_json("sys", "usr", SCHEMA)
+
+
 def test_sends_a_user_agent(monkeypatch, client):
     """Cloudflare 403s the default Python agent, so this is load-bearing."""
     capture = {}
@@ -79,7 +111,7 @@ def test_sends_model_schema_and_messages(monkeypatch, client):
     sent = json.loads(capture["request"].data)
     assert sent["model"] == "gemma4:12b"
     assert sent["format"] == SCHEMA
-    assert sent["stream"] is False
+    assert sent["stream"] is True, "streaming keeps the proxy from timing out"
     assert sent["messages"][0] == {"role": "system", "content": "SYS"}
     assert sent["messages"][1] == {"role": "user", "content": "USR"}
 
@@ -124,7 +156,7 @@ def test_non_json_content_is_an_error(monkeypatch, client):
 
 
 def test_missing_counters_default_to_zero(monkeypatch, client):
-    fake_urlopen(monkeypatch, {"message": {"content": '{"a":"b"}'}})
+    fake_urlopen(monkeypatch, [{"message": {"content": '{"a":"b"}'}, "done": True}])
     _, meta = client.chat_json("sys", "usr", SCHEMA)
     assert meta.output_tokens == 0
     assert meta.tokens_per_second == 0.0
