@@ -22,9 +22,14 @@ def get_pipeline():
     return build_pipeline()
 
 
-@st.cache_resource(show_spinner=False)
 def get_teacher():
-    """The 3H layer. Holds no state; safe to reuse across reruns."""
+    """The 3H layer.
+
+    Deliberately not cached. It only holds references — the expensive part, the
+    embedding model, lives in the cached pipeline. Caching it would pin a stale
+    instance across code changes, which with the file watcher disabled means an
+    edited method appears missing until the whole app is restarted.
+    """
     return Teacher(pipeline=get_pipeline())
 
 
