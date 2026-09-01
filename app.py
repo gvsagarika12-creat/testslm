@@ -61,8 +61,8 @@ with st.sidebar:
     st.caption(f"Vectors: {stats['backend']} · {stats['location']}")
     st.caption(f"Files: {stats['file_store']}")
 
-ingest_tab, inspect_tab, search_tab, teach_tab, sim_tab = st.tabs(
-    ["Ingest", "Inspect", "Search", "Teach", "Simulate"]
+ingest_tab, inspect_tab, search_tab, teach_tab = st.tabs(
+    ["Ingest", "Inspect", "Search", "Teach"]
 )
 
 with ingest_tab:
@@ -194,299 +194,308 @@ with search_tab:
 
 with teach_tab:
     st.subheader("Teach — 3H")
-    st.caption(
-        f"Answers are written by `{settings.ollama_model}` from retrieved passages "
-        "only. Expect 60–90 seconds."
+    mode = st.radio(
+        "Mode",
+        ["Explain a topic", "Run a case"],
+        horizontal=True,
+        label_visibility="collapsed",
+        help="Explaining teaches from the passages. A case puts a patient in front of you, and is the only mode that can score HEART.",
     )
 
-    teach_question = st.text_input(
-        "Learner question", key="teach_q",
-        placeholder="How is central retinal artery occlusion treated?",
-    )
-    context_chunks = st.slider(
-        "Passages to teach from", 2, 12, settings.teach_context_chunks
-    )
+    if mode == "Explain a topic":
+        st.caption(
+            f"Answers are written by `{settings.ollama_model}` from retrieved passages "
+            "only. Expect 60–90 seconds."
+        )
 
-    if st.button("Teach", type="primary", disabled=not teach_question.strip()):
-        with st.spinner(f"{settings.ollama_model} is reading the passages…"):
-            try:
-                st.session_state["teach_answer"] = get_teacher().answer(
-                    teach_question, k=context_chunks
-                )
-                st.session_state.pop("teach_error", None)
-                # A new question means the previous grading no longer applies.
-                st.session_state.pop("assessment", None)
-                st.session_state.pop("assess_error", None)
-            except (LLMError, ValueError) as exc:
-                st.session_state["teach_error"] = str(exc)
-                st.session_state.pop("teach_answer", None)
+        teach_question = st.text_input(
+            "Learner question", key="teach_q",
+            placeholder="How is central retinal artery occlusion treated?",
+        )
+        context_chunks = st.slider(
+            "Passages to teach from", 2, 12, settings.teach_context_chunks
+        )
 
-    if st.session_state.get("teach_error"):
-        st.error(st.session_state["teach_error"])
-
-    answer = st.session_state.get("teach_answer")
-    if answer:
-        st.markdown(f"### {answer.title}")
-
-        if answer.overview:
-            st.write(answer.overview)
-
-        for card in answer.cards:
-            with st.container(border=True):
-                badge, flag = st.columns([1, 6])
-                with badge:
-                    st.markdown(f"**{VECTOR_BADGES[card.vector]}**")
-                with flag:
-                    if not card.grounded:
-                        st.caption("⚠️ no traceable source")
-                st.markdown(f"**{card.headline}**")
-                for bullet in card.bullets:
-                    st.markdown(
-                        f"<div style='color:#666;margin-left:1em'>– {bullet}</div>",
-                        unsafe_allow_html=True,
+        if st.button("Teach", type="primary", disabled=not teach_question.strip()):
+            with st.spinner(f"{settings.ollama_model} is reading the passages…"):
+                try:
+                    st.session_state["teach_answer"] = get_teacher().answer(
+                        teach_question, k=context_chunks
                     )
+                    st.session_state.pop("teach_error", None)
+                    # A new question means the previous grading no longer applies.
+                    st.session_state.pop("assessment", None)
+                    st.session_state.pop("assess_error", None)
+                except (LLMError, ValueError) as exc:
+                    st.session_state["teach_error"] = str(exc)
+                    st.session_state.pop("teach_answer", None)
 
-        if answer.picture_this:
-            st.markdown(f"*Picture this: {answer.picture_this}*")
+        if st.session_state.get("teach_error"):
+            st.error(st.session_state["teach_error"])
 
-        if answer.unverified_claims:
-            st.warning("**[UNVERIFIED — CONFIRM WITH FACULTY]**")
-            for claim in answer.unverified_claims:
-                st.markdown(f"- {claim}")
+        answer = st.session_state.get("teach_answer")
+        if answer:
+            st.markdown(f"### {answer.title}")
 
-        if answer.retrieval_question:
-            st.info(f"**{answer.retrieval_question}**")
+            if answer.overview:
+                st.write(answer.overview)
 
-            learner_answer = st.text_area(
-                "Your answer", key="learner_answer", height=100,
-                placeholder="Answer in your own words — then submit for grading.",
-            )
-            if st.button(
-                "Submit answer", disabled=not learner_answer.strip(), key="submit_answer"
-            ):
-                with st.spinner("Grading your answer…"):
-                    try:
-                        st.session_state["assessment"] = get_teacher().assess(
-                            answer.retrieval_question, learner_answer, answer.hits
-                        )
-                        st.session_state.pop("assess_error", None)
-                    except (LLMError, ValueError) as exc:
-                        st.session_state["assess_error"] = str(exc)
-                        st.session_state.pop("assessment", None)
-
-            if st.session_state.get("assess_error"):
-                st.error(st.session_state["assess_error"])
-
-            assessment = st.session_state.get("assessment")
-            if assessment:
+            for card in answer.cards:
                 with st.container(border=True):
-                    verdict_style = {
-                        "correct": st.success,
-                        "partially_correct": st.warning,
-                        "incorrect": st.error,
-                    }.get(assessment.verdict, st.info)
-                    verdict_style(f"**{assessment.verdict_label}**")
+                    badge, flag = st.columns([1, 6])
+                    with badge:
+                        st.markdown(f"**{VECTOR_BADGES[card.vector]}**")
+                    with flag:
+                        if not card.grounded:
+                            st.caption("⚠️ no traceable source")
+                    st.markdown(f"**{card.headline}**")
+                    for bullet in card.bullets:
+                        st.markdown(
+                            f"<div style='color:#666;margin-left:1em'>– {bullet}</div>",
+                            unsafe_allow_html=True,
+                        )
 
-                    if assessment.acknowledgement:
-                        st.write(assessment.acknowledgement)
+            if answer.picture_this:
+                st.markdown(f"*Picture this: {answer.picture_this}*")
 
-                    if assessment.assessed_scores:
-                        columns = st.columns(len(assessment.assessed_scores))
-                        for column, score in zip(columns, assessment.assessed_scores):
-                            column.metric(score.badge, f"{score.level}/4", score.anchor)
+            if answer.unverified_claims:
+                st.warning("**[UNVERIFIED — CONFIRM WITH FACULTY]**")
+                for claim in answer.unverified_claims:
+                    st.markdown(f"- {claim}")
 
-                    if assessment.what_was_right:
-                        st.markdown("**What you got right**")
-                        for point in assessment.what_was_right:
-                            st.markdown(f"- {point}")
+            if answer.retrieval_question:
+                st.info(f"**{answer.retrieval_question}**")
 
-                    if assessment.what_was_missed:
-                        st.markdown("**What was missing**")
-                        for point in assessment.what_was_missed:
-                            st.markdown(f"- {point}")
+                learner_answer = st.text_area(
+                    "Your answer", key="learner_answer", height=100,
+                    placeholder="Answer in your own words — then submit for grading.",
+                )
+                if st.button(
+                    "Submit answer", disabled=not learner_answer.strip(), key="submit_answer"
+                ):
+                    with st.spinner("Grading your answer…"):
+                        try:
+                            st.session_state["assessment"] = get_teacher().assess(
+                                answer.retrieval_question, learner_answer, answer.hits
+                            )
+                            st.session_state.pop("assess_error", None)
+                        except (LLMError, ValueError) as exc:
+                            st.session_state["assess_error"] = str(exc)
+                            st.session_state.pop("assessment", None)
 
-                    if assessment.model_answer:
-                        st.markdown("**The answer**")
-                        st.write(assessment.model_answer)
-                        if assessment.citations:
-                            st.caption(
-                                "Sources: "
-                                + " · ".join(f"`{c}`" for c in assessment.citations)
+                if st.session_state.get("assess_error"):
+                    st.error(st.session_state["assess_error"])
+
+                assessment = st.session_state.get("assessment")
+                if assessment:
+                    with st.container(border=True):
+                        verdict_style = {
+                            "correct": st.success,
+                            "partially_correct": st.warning,
+                            "incorrect": st.error,
+                        }.get(assessment.verdict, st.info)
+                        verdict_style(f"**{assessment.verdict_label}**")
+
+                        if assessment.acknowledgement:
+                            st.write(assessment.acknowledgement)
+
+                        if assessment.assessed_scores:
+                            columns = st.columns(len(assessment.assessed_scores))
+                            for column, score in zip(columns, assessment.assessed_scores):
+                                column.metric(score.badge, f"{score.level}/4", score.anchor)
+
+                        if assessment.what_was_right:
+                            st.markdown("**What you got right**")
+                            for point in assessment.what_was_right:
+                                st.markdown(f"- {point}")
+
+                        if assessment.what_was_missed:
+                            st.markdown("**What was missing**")
+                            for point in assessment.what_was_missed:
+                                st.markdown(f"- {point}")
+
+                        if assessment.model_answer:
+                            st.markdown("**The answer**")
+                            st.write(assessment.model_answer)
+                            if assessment.citations:
+                                st.caption(
+                                    "Sources: "
+                                    + " · ".join(f"`{c}`" for c in assessment.citations)
+                                )
+
+                        if assessment.feed_forward:
+                            st.markdown(f"**Next:** {assessment.feed_forward}")
+
+                        if assessment.needs_faculty_review:
+                            st.warning(
+                                "🚩 **FACULTY REVIEW** — the grader was not confident "
+                                "in this assessment."
                             )
 
-                    if assessment.feed_forward:
-                        st.markdown(f"**Next:** {assessment.feed_forward}")
+                        if assessment.warnings:
+                            with st.expander("⚠️ Grading warnings"):
+                                for warning in assessment.warnings:
+                                    st.markdown(f"- {warning}")
 
-                    if assessment.needs_faculty_review:
-                        st.warning(
-                            "🚩 **FACULTY REVIEW** — the grader was not confident "
-                            "in this assessment."
-                        )
+                        if assessment.llm:
+                            st.caption(
+                                f"graded in {assessment.llm.duration_seconds:.0f}s · "
+                                f"confidence {assessment.grader_confidence}"
+                            )
 
-                    if assessment.warnings:
-                        with st.expander("⚠️ Grading warnings"):
-                            for warning in assessment.warnings:
-                                st.markdown(f"- {warning}")
+            if answer.sources:
+                st.caption("Sources: " + " · ".join(f"`{s}`" for s in answer.sources))
 
-                    if assessment.llm:
-                        st.caption(
-                            f"graded in {assessment.llm.duration_seconds:.0f}s · "
-                            f"confidence {assessment.grader_confidence}"
-                        )
-
-        if answer.sources:
-            st.caption("Sources: " + " · ".join(f"`{s}`" for s in answer.sources))
-
-        if answer.uncovered_vectors:
-            st.caption(
-                "Not covered by the ingested sources: "
-                + ", ".join(v.upper() for v in answer.uncovered_vectors)
-            )
-
-        if answer.gap_report:
-            with st.expander(f"Gap report ({len(answer.gap_report)})"):
-                for gap in answer.gap_report:
-                    st.markdown(f"- {gap}")
-
-        if answer.warnings:
-            with st.expander(f"⚠️ Contract warnings ({len(answer.warnings)})"):
-                for warning in answer.warnings:
-                    st.markdown(f"- {warning}")
-
-        with st.expander(f"Passages this answer was written from ({len(answer.hits)})"):
-            for hit in answer.hits:
-                st.markdown(
-                    f"**{hit.score:.3f}** · `{hit.source_filename}` · "
-                    f"{format_page_range(hit.page_start, hit.page_end)}"
+            if answer.uncovered_vectors:
+                st.caption(
+                    "Not covered by the ingested sources: "
+                    + ", ".join(v.upper() for v in answer.uncovered_vectors)
                 )
-                st.write(hit.text)
-                st.divider()
 
-        if answer.llm:
-            st.caption(
-                f"{answer.llm.output_tokens} tokens in "
-                f"{answer.llm.duration_seconds:.1f}s "
-                f"({answer.llm.tokens_per_second:.1f} tok/s)"
-            )
+            if answer.gap_report:
+                with st.expander(f"Gap report ({len(answer.gap_report)})"):
+                    for gap in answer.gap_report:
+                        st.markdown(f"- {gap}")
 
-with sim_tab:
-    st.subheader("Simulate — a case, scored on all three vectors")
-    st.caption(
-        "A three-scene case: reasoning, then the patient's distress, then "
-        "management. HEART is scored from what you actually say to the patient — "
-        "which a factual question can never measure."
-    )
+            if answer.warnings:
+                with st.expander(f"⚠️ Contract warnings ({len(answer.warnings)})"):
+                    for warning in answer.warnings:
+                        st.markdown(f"- {warning}")
 
-    case = st.session_state.get("case")
+            with st.expander(f"Passages this answer was written from ({len(answer.hits)})"):
+                for hit in answer.hits:
+                    st.markdown(
+                        f"**{hit.score:.3f}** · `{hit.source_filename}` · "
+                        f"{format_page_range(hit.page_start, hit.page_end)}"
+                    )
+                    st.write(hit.text)
+                    st.divider()
 
-    if case is None:
-        topic = st.text_input(
-            "Case topic", key="case_topic",
-            placeholder="central retinal artery occlusion",
-        )
-        if st.button("Start case", type="primary", disabled=not topic.strip()):
-            with st.spinner("Building the case…"):
-                try:
-                    st.session_state["case"] = get_simulator().start(topic)
-                    st.session_state.pop("case_error", None)
-                    st.rerun()
-                except (LLMError, ValueError) as exc:
-                    st.session_state["case_error"] = str(exc)
-        if st.session_state.get("case_error"):
-            st.error(st.session_state["case_error"])
+            if answer.llm:
+                st.caption(
+                    f"{answer.llm.output_tokens} tokens in "
+                    f"{answer.llm.duration_seconds:.1f}s "
+                    f"({answer.llm.tokens_per_second:.1f} tok/s)"
+                )
+
 
     else:
-        header, control = st.columns([5, 1])
-        header.markdown(f"### {case.title}")
-        if control.button("End case"):
-            for key in ("case", "case_error"):
-                st.session_state.pop(key, None)
-            st.rerun()
+        st.caption(
+            "A three-scene case: reasoning, then the patient's distress, then "
+            "management. HEART is scored from what you actually say to the patient — "
+            "which a factual question can never measure."
+        )
 
-        st.write(case.presentation)
-        st.markdown(f"*The patient: {case.persona}*")
-        if case.citations:
-            st.caption("Sources: " + " · ".join(f"`{c}`" for c in case.citations))
+        case = st.session_state.get("case")
 
-        for turn in case.turns:
-            with st.container(border=True):
-                st.markdown(f"**{VECTOR_BADGES[turn.scene.vector]} · scene "
-                            f"{turn.scene.index + 1}**")
-                st.write(turn.scene.situation)
-                st.caption(turn.scene.prompt)
-                st.markdown(f"> {turn.learner_reply}")
-                if turn.reaction:
-                    st.write(turn.reaction)
+        if case is None:
+            topic = st.text_input(
+                "Case topic", key="case_topic",
+                placeholder="central retinal artery occlusion",
+            )
+            if st.button("Start case", type="primary", disabled=not topic.strip()):
+                with st.spinner("Building the case…"):
+                    try:
+                        st.session_state["case"] = get_simulator().start(topic)
+                        st.session_state.pop("case_error", None)
+                        st.rerun()
+                    except (LLMError, ValueError) as exc:
+                        st.session_state["case_error"] = str(exc)
+            if st.session_state.get("case_error"):
+                st.error(st.session_state["case_error"])
 
-        if not case.finished:
-            scene = case.scene
-            with st.container(border=True):
-                st.markdown(f"**{VECTOR_BADGES[scene.vector]} · scene "
-                            f"{scene.index + 1} of 3**")
-                st.write(scene.situation)
-                st.markdown(f"**{scene.prompt}**")
-                reply = st.text_area(
-                    "Your response", key=f"scene_{scene.index}", height=110
-                )
-                if st.button("Respond", type="primary", disabled=not reply.strip()):
-                    with st.spinner("…"):
+        else:
+            header, control = st.columns([5, 1])
+            header.markdown(f"### {case.title}")
+            if control.button("End case"):
+                for key in ("case", "case_error"):
+                    st.session_state.pop(key, None)
+                st.rerun()
+
+            st.write(case.presentation)
+            st.markdown(f"*The patient: {case.persona}*")
+            if case.citations:
+                st.caption("Sources: " + " · ".join(f"`{c}`" for c in case.citations))
+
+            for turn in case.turns:
+                with st.container(border=True):
+                    st.markdown(f"**{VECTOR_BADGES[turn.scene.vector]} · scene "
+                                f"{turn.scene.index + 1}**")
+                    st.write(turn.scene.situation)
+                    st.caption(turn.scene.prompt)
+                    st.markdown(f"> {turn.learner_reply}")
+                    if turn.reaction:
+                        st.write(turn.reaction)
+
+            if not case.finished:
+                scene = case.scene
+                with st.container(border=True):
+                    st.markdown(f"**{VECTOR_BADGES[scene.vector]} · scene "
+                                f"{scene.index + 1} of 3**")
+                    st.write(scene.situation)
+                    st.markdown(f"**{scene.prompt}**")
+                    reply = st.text_area(
+                        "Your response", key=f"scene_{scene.index}", height=110
+                    )
+                    if st.button("Respond", type="primary", disabled=not reply.strip()):
+                        with st.spinner("…"):
+                            try:
+                                st.session_state["case"] = get_simulator().respond(case, reply)
+                                st.rerun()
+                            except (LLMError, ValueError) as exc:
+                                st.error(str(exc))
+
+            elif case.debrief is None:
+                st.success("All three scenes complete.")
+                if st.button("Score this case", type="primary"):
+                    with st.spinner("Scoring against the §8 anchors…"):
                         try:
-                            st.session_state["case"] = get_simulator().respond(case, reply)
+                            get_simulator().score(case)
+                            st.session_state["case"] = case
                             st.rerun()
                         except (LLMError, ValueError) as exc:
                             st.error(str(exc))
 
-        elif case.debrief is None:
-            st.success("All three scenes complete.")
-            if st.button("Score this case", type="primary"):
-                with st.spinner("Scoring against the §8 anchors…"):
-                    try:
-                        get_simulator().score(case)
-                        st.session_state["case"] = case
-                        st.rerun()
-                    except (LLMError, ValueError) as exc:
-                        st.error(str(exc))
+            if case.debrief:
+                d = case.debrief
+                st.markdown("### Debrief")
+                with st.container(border=True):
+                    {"correct": st.success, "partially_correct": st.warning,
+                     "incorrect": st.error}.get(d.verdict, st.info)(f"**{d.verdict_label}**")
 
-        if case.debrief:
-            d = case.debrief
-            st.markdown("### Debrief")
-            with st.container(border=True):
-                {"correct": st.success, "partially_correct": st.warning,
-                 "incorrect": st.error}.get(d.verdict, st.info)(f"**{d.verdict_label}**")
+                    if d.acknowledgement:
+                        st.write(d.acknowledgement)
 
-                if d.acknowledgement:
-                    st.write(d.acknowledgement)
+                    columns = st.columns(3)
+                    for column, s in zip(columns, d.scores):
+                        column.metric(s.badge, f"{s.level}/4", s.anchor)
+                    for s in d.scores:
+                        if s.evidence:
+                            st.caption(f"**{s.badge}** — your words: “{s.evidence}”")
 
-                columns = st.columns(3)
-                for column, s in zip(columns, d.scores):
-                    column.metric(s.badge, f"{s.level}/4", s.anchor)
-                for s in d.scores:
-                    if s.evidence:
-                        st.caption(f"**{s.badge}** — your words: “{s.evidence}”")
+                    if d.what_was_right:
+                        st.markdown("**What you did well**")
+                        for point in d.what_was_right:
+                            st.markdown(f"- {point}")
+                    if d.what_was_missed:
+                        st.markdown("**What was missing**")
+                        for point in d.what_was_missed:
+                            st.markdown(f"- {point}")
+                    if d.model_answer:
+                        st.markdown("**How a strong learner handles this case**")
+                        st.write(d.model_answer)
+                        if d.citations:
+                            st.caption("Sources: " + " · ".join(f"`{c}`" for c in d.citations))
+                    if d.feed_forward:
+                        st.markdown(f"**Next:** {d.feed_forward}")
+                    if d.needs_faculty_review:
+                        st.warning("🚩 **FACULTY REVIEW** — the grader was not confident.")
+                    if d.warnings:
+                        with st.expander("⚠️ Grading warnings"):
+                            for warning in d.warnings:
+                                st.markdown(f"- {warning}")
 
-                if d.what_was_right:
-                    st.markdown("**What you did well**")
-                    for point in d.what_was_right:
-                        st.markdown(f"- {point}")
-                if d.what_was_missed:
-                    st.markdown("**What was missing**")
-                    for point in d.what_was_missed:
-                        st.markdown(f"- {point}")
-                if d.model_answer:
-                    st.markdown("**How a strong learner handles this case**")
-                    st.write(d.model_answer)
-                    if d.citations:
-                        st.caption("Sources: " + " · ".join(f"`{c}`" for c in d.citations))
-                if d.feed_forward:
-                    st.markdown(f"**Next:** {d.feed_forward}")
-                if d.needs_faculty_review:
-                    st.warning("🚩 **FACULTY REVIEW** — the grader was not confident.")
-                if d.warnings:
-                    with st.expander("⚠️ Grading warnings"):
-                        for warning in d.warnings:
-                            st.markdown(f"- {warning}")
-
-        if case.warnings:
-            with st.expander(f"⚠️ Case warnings ({len(case.warnings)})"):
-                for warning in case.warnings:
-                    st.markdown(f"- {warning}")
+            if case.warnings:
+                with st.expander(f"⚠️ Case warnings ({len(case.warnings)})"):
+                    for warning in case.warnings:
+                        st.markdown(f"- {warning}")
