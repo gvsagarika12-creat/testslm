@@ -155,12 +155,24 @@ class Simulator:
     def _system(self) -> str:
         return build_system_prompt("simulate", self.config)
 
-    def start(self, topic: str, k: int | None = None) -> CaseSession:
-        """Build a case from the corpus and open scene 1."""
+    def start(
+        self,
+        topic: str,
+        k: int | None = None,
+        hits: Sequence[Hit] | None = None,
+    ) -> CaseSession:
+        """Build a case from the corpus and open scene 1.
+
+        Pass `hits` to build the case from passages already retrieved — when a
+        case follows a teaching answer, it must be built from the same material
+        the learner was just taught. §3's misalignment check: assess what was
+        actually taught, not something adjacent the retriever happened to find.
+        """
         if not topic.strip():
             raise ValueError("a topic is required")
 
-        hits = self.pipeline.search(topic, k=k or self.config.teach_context_chunks)
+        if hits is None:
+            hits = self.pipeline.search(topic, k=k or self.config.teach_context_chunks)
         if not hits:
             raise LLMError(
                 "nothing in the corpus matches this topic — ingest relevant "
