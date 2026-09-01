@@ -104,6 +104,15 @@ class OllamaClient:
         except json.JSONDecodeError as exc:
             raise LLMError(f"malformed stream from {self.base_url}: {exc}") from exc
 
+        if not final:
+            # No chunk carried done=true, so the stream was cut short rather
+            # than finishing. Blaming the model for "an empty response" here
+            # sends you looking at prompts when the endpoint dropped.
+            raise LLMError(
+                f"the stream from {self.base_url} ended before the model "
+                f"finished — the endpoint may be down or the connection dropped"
+            )
+
         final["message"] = {
             "role": "assistant",
             "content": "".join(content_parts),

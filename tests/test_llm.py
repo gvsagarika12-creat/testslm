@@ -189,3 +189,19 @@ def test_real_endpoint_honours_a_json_schema():
     )
     assert "answer" in parsed
     assert meta.output_tokens > 0
+
+
+def test_a_truncated_stream_says_so_rather_than_blaming_the_model(monkeypatch, client):
+    """No done chunk means the connection dropped, not that the model was silent."""
+    fake_urlopen(monkeypatch, [
+        {"message": {"content": '{"a": "par'}, "done": False},
+    ])
+    with pytest.raises(LLMError, match="ended before the model finished"):
+        client.chat_json("sys", "usr", SCHEMA)
+
+
+def test_a_completed_stream_with_no_content_still_reports_an_empty_response(monkeypatch, client):
+    """A finished stream that produced nothing is a genuine model failure."""
+    fake_urlopen(monkeypatch, [{"message": {"content": ""}, "done": True}])
+    with pytest.raises(LLMError, match="empty response"):
+        client.chat_json("sys", "usr", SCHEMA)
