@@ -6,9 +6,14 @@ SDK for one request shape would be more dependency than value.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+
+# Statuses a reverse proxy returns when the origin was too slow or briefly
+# unavailable — never the model rejecting the request. Retrying is safe.
+RETRYABLE_STATUSES = frozenset({502, 503, 504, 520, 521, 522, 523, 524})
 
 
 class LLMError(Exception):
@@ -37,11 +42,15 @@ class OllamaClient:
         model: str,
         timeout_seconds: int = 300,
         temperature: float = 0.2,
+        max_retries: int = 1,
+        retry_delay_seconds: float = 3.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.temperature = temperature
+        self.max_retries = max_retries
+        self.retry_delay_seconds = retry_delay_seconds
 
     def list_models(self) -> list[str]:
         return [m["name"] for m in self._post_get("/api/tags").get("models", [])]
@@ -56,6 +65,32 @@ class OllamaClient:
                 return json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, json.JSONDecodeError) as exc:
             raise LLMError(f"could not list models at {self.base_url}: {exc}") from exc
+
+    def _stream_with_retry(self, path: str, payload: dict) -> dict:
+        """Stream, retrying when the proxy times out waiting for the origin.
+
+        Ollama unloads an idle model, and reloading a multi-gigabyte one takes
+        longer than a reverse proxy will wait — the request dies with a 524
+        while the load carries on server-side. So the first call after a quiet
+        period fails and the next succeeds. Retrying turns that into a slow
+        answer instead of an error the reader has to interpret.
+
+        Only one retry: it recovers a cold model, which is a real and common
+        case. More than that just multiplies the wait before the reader sees an
+        error that retrying was never going to fix — such as a proxy whose
+        timeout is shorter than the model needs to read a long prompt.
+        """
+        last: LLMError | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self._stream(path, payload)
+            except LLMError as exc:
+                last = exc
+                if not getattr(exc, "retryable", False):
+                    raise
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay_seconds)
+        raise last
 
     def _stream(self, path: str, payload: dict) -> dict:
         """Consume a streamed Ollama reply, returning a single response dict.
@@ -93,14 +128,23 @@ class OllamaClient:
                     if chunk.get("done"):
                         final = chunk
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:300]
+            detail = exc.read().decode("utf-8", "replace")[:200].strip()
+            if exc.code in RETRYABLE_STATUSES:
+                error = LLMError(
+                    f"{self.base_url} returned {exc.code} — the model was probably "
+                    f"still loading. Retrying."
+                )
+                error.retryable = True
+                raise error from exc
             raise LLMError(f"{self.base_url} returned {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise LLMError(f"could not reach {self.base_url}: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise LLMError(
+            error = LLMError(
                 f"{self.model} did not respond within {self.timeout_seconds}s"
-            ) from exc
+            )
+            error.retryable = True
+            raise error from exc
         except json.JSONDecodeError as exc:
             raise LLMError(f"malformed stream from {self.base_url}: {exc}") from exc
 
@@ -108,10 +152,12 @@ class OllamaClient:
             # No chunk carried done=true, so the stream was cut short rather
             # than finishing. Blaming the model for "an empty response" here
             # sends you looking at prompts when the endpoint dropped.
-            raise LLMError(
+            error = LLMError(
                 f"the stream from {self.base_url} ended before the model "
-                f"finished — the endpoint may be down or the connection dropped"
+                f"finished — the connection dropped or the model was still loading"
             )
+            error.retryable = True
+            raise error
 
         final["message"] = {
             "role": "assistant",
@@ -121,19 +167,32 @@ class OllamaClient:
         return final
 
     def chat_json(
-        self, system: str, user: str, schema: dict, num_ctx: int = 16384
+        self, system: str, user: str, schema: dict, num_ctx: int = 8192
     ) -> tuple[dict, LLMResponse]:
         """One structured request. Returns (parsed object, response metadata).
 
         `schema` is passed as Ollama's `format`, which constrains decoding — the
         reply is valid JSON matching the schema rather than prose to be salvaged.
         """
-        raw = self._stream(
+        raw = self._stream_with_retry(
             "/api/chat",
             {
                 "model": self.model,
                 "stream": True,
                 "format": schema,
+                # num_ctx is deliberately modest. Asking for 16384 alongside an
+                # 8.4GB model made the server stall long enough that the proxy
+                # gave up before a single token was emitted, while 8192 produced
+                # a first byte in under a minute on the same prompt. Real
+                # requests here run ~5,300 prompt tokens plus ~600 generated,
+                # so a 16K window bought nothing and cost every request.
+                #
+                # Ask the server to hold the model in memory. Ollama unloads
+                # after 5 minutes idle by default, and reloading several
+                # gigabytes is what causes the first request after a pause to
+                # time out. Requesting it per-call means the fix travels with
+                # the client, without needing OLLAMA_KEEP_ALIVE set on the box.
+                "keep_alive": "30m",
                 "options": {
                     "temperature": self.temperature,
                     "num_ctx": num_ctx,

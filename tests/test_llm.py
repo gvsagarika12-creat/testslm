@@ -205,3 +205,85 @@ def test_a_completed_stream_with_no_content_still_reports_an_empty_response(monk
     fake_urlopen(monkeypatch, [{"message": {"content": ""}, "done": True}])
     with pytest.raises(LLMError, match="empty response"):
         client.chat_json("sys", "usr", SCHEMA)
+
+
+# --- retrying a cold model --------------------------------------------------
+
+def test_a_gateway_timeout_is_retried(monkeypatch):
+    """Ollama unloads an idle model; the reload outlasts the proxy's patience.
+
+    The first call dies with a 524 while the load continues server-side, so the
+    retry finds the model warm. Without this the learner just sees an error.
+    """
+    client = OllamaClient("https://x.test", "m", max_retries=2, retry_delay_seconds=0)
+    calls = {"n": 0}
+    ndjson = b"".join(json.dumps(c).encode() + b"\n" for c in ok_body())
+
+    def _open(request, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError("u", 524, "Timeout", {}, io.BytesIO(b"524"))
+        return io.BytesIO(ndjson)
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    parsed, _ = client.chat_json("sys", "usr", SCHEMA)
+    assert parsed == {"a": "b"}
+    assert calls["n"] == 2, "should have retried exactly once"
+
+
+def test_a_truncated_stream_is_retried(monkeypatch):
+    client = OllamaClient("https://x.test", "m", max_retries=2, retry_delay_seconds=0)
+    calls = {"n": 0}
+
+    def _open(request, timeout=None):
+        calls["n"] += 1
+        chunks = ([{"message": {"content": "{"}, "done": False}] if calls["n"] == 1
+                  else ok_body())
+        return io.BytesIO(b"".join(json.dumps(c).encode() + b"\n" for c in chunks))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    parsed, _ = client.chat_json("sys", "usr", SCHEMA)
+    assert parsed == {"a": "b"}
+    assert calls["n"] == 2
+
+
+def test_a_client_error_is_not_retried(monkeypatch):
+    """A 404 means the model name is wrong; retrying just wastes time."""
+    client = OllamaClient("https://x.test", "m", max_retries=3, retry_delay_seconds=0)
+    calls = {"n": 0}
+
+    def _open(request, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError("u", 404, "Not Found", {}, io.BytesIO(b"no model"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    with pytest.raises(LLMError, match="404"):
+        client.chat_json("sys", "usr", SCHEMA)
+    assert calls["n"] == 1, "a 404 must not be retried"
+
+
+def test_retries_give_up_and_report_the_last_error(monkeypatch):
+    client = OllamaClient("https://x.test", "m", max_retries=2, retry_delay_seconds=0)
+    calls = {"n": 0}
+
+    def _open(request, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError("u", 524, "Timeout", {}, io.BytesIO(b"524"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    with pytest.raises(LLMError, match="524"):
+        client.chat_json("sys", "usr", SCHEMA)
+    assert calls["n"] == 3, "the original attempt plus two retries"
+
+
+def test_the_default_is_a_single_retry():
+    """One retry recovers a cold model; more only delays an unfixable error."""
+    assert OllamaClient("https://x.test", "m").max_retries == 1
+
+
+def test_it_asks_the_server_to_keep_the_model_loaded(monkeypatch, client):
+    """keep_alive is what stops the model unloading between questions."""
+    capture = {}
+    fake_urlopen(monkeypatch, ok_body(), capture)
+    client.chat_json("sys", "usr", SCHEMA)
+    assert json.loads(capture["request"].data)["keep_alive"] == "30m"
