@@ -10,7 +10,7 @@ import streamlit as st
 from ragforge.config import settings
 from ragforge.llm import LLMError
 from ragforge.pipeline import IngestReport, build_pipeline
-from ragforge.teach import VECTORS, Teacher
+from ragforge.teach import VECTOR_BADGES, VECTORS, Teacher
 from ragforge.ui_helpers import format_page_range, pending_uploads, report_rows
 
 st.set_page_config(page_title="RAGForge", layout="wide")
@@ -212,31 +212,50 @@ with teach_tab:
 
     answer = st.session_state.get("teach_answer")
     if answer:
-        st.markdown(f"### {answer.topic}")
+        st.markdown(f"### {answer.title}")
 
-        for vector in VECTORS:
-            section = answer.sections[vector]
-            st.markdown(f"#### {section.label}")
-            if section.covered and section.content:
-                st.write(section.content)
-                if section.citations:
-                    st.caption("Sources: " + " · ".join(f"`{c}`" for c in section.citations))
-            else:
-                st.info("Not covered by the ingested sources.")
+        if answer.overview:
+            st.write(answer.overview)
+
+        for card in answer.cards:
+            with st.container(border=True):
+                badge, flag = st.columns([1, 6])
+                with badge:
+                    st.markdown(f"**{VECTOR_BADGES[card.vector]}**")
+                with flag:
+                    if not card.grounded:
+                        st.caption("⚠️ no traceable source")
+                st.markdown(f"**{card.headline}**")
+                for bullet in card.bullets:
+                    st.markdown(
+                        f"<div style='color:#666;margin-left:1em'>– {bullet}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        if answer.picture_this:
+            st.markdown(f"*Picture this: {answer.picture_this}*")
 
         if answer.unverified_claims:
             st.warning("**[UNVERIFIED — CONFIRM WITH FACULTY]**")
             for claim in answer.unverified_claims:
                 st.markdown(f"- {claim}")
 
+        if answer.retrieval_question:
+            st.info(f"**{answer.retrieval_question}**")
+
+        if answer.sources:
+            st.caption("Sources: " + " · ".join(f"`{s}`" for s in answer.sources))
+
+        if answer.uncovered_vectors:
+            st.caption(
+                "Not covered by the ingested sources: "
+                + ", ".join(v.upper() for v in answer.uncovered_vectors)
+            )
+
         if answer.gap_report:
             with st.expander(f"Gap report ({len(answer.gap_report)})"):
                 for gap in answer.gap_report:
                     st.markdown(f"- {gap}")
-
-        if answer.retrieval_question:
-            st.markdown("#### Retrieval check")
-            st.markdown(f"> {answer.retrieval_question}")
 
         if answer.warnings:
             with st.expander(f"⚠️ Contract warnings ({len(answer.warnings)})"):

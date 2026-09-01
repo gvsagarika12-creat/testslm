@@ -21,15 +21,26 @@ HITS = [
 ]
 
 
+def card(vector="head", headline="A claim.", bullets=None, citations=None):
+    return {
+        "vector": vector,
+        "headline": headline,
+        "bullets": bullets if bullets is not None else ["fact one", "fact two"],
+        "citations": citations if citations is not None else ["crao.pdf p1"],
+    }
+
+
 def reply(**overrides):
     """A well-formed model reply, overridable per test."""
     base = {
-        "topic": "Central retinal artery occlusion",
-        "head": {"covered": True, "content": "A blockage of the retinal artery.",
-                 "citations": ["crao.pdf p1"]},
-        "heart": {"covered": False, "content": "", "citations": []},
-        "hands": {"covered": True, "content": "Ocular massage is attempted.",
-                  "citations": ["crao.pdf p3-4"]},
+        "title": "Management of Central Retinal Artery Occlusion",
+        "overview": "CRAO is a blockage of the retinal artery causing sudden vision loss.",
+        "cards": [
+            card("head", "CRAO is an arterial blockage."),
+            card("hands", "Ocular massage is attempted first.",
+                 citations=["crao.pdf p3-4"]),
+        ],
+        "picture_this": "The retina pales while the fovea stays red.",
         "gap_report": ["heart: no consent or communication content in the sources"],
         "unverified_claims": [],
         "retrieval_question": "What determines outcome in CRAO?",
@@ -68,9 +79,13 @@ class FakePipeline:
         return self.hits[:k]
 
 
+def teach(payload=None, hits=None):
+    return Teacher(FakePipeline(hits), FakeClient(payload)).answer("How is CRAO treated?")
+
+
 @pytest.fixture
-def teacher():
-    return Teacher(pipeline=FakePipeline(), client=FakeClient())
+def answer():
+    return teach()
 
 
 # --- citation labels --------------------------------------------------------
@@ -90,45 +105,77 @@ def test_context_prefixes_each_passage_with_its_label():
     assert "ocular massage" in context
 
 
-# --- the happy path ---------------------------------------------------------
+# --- the answer shape -------------------------------------------------------
 
-def test_answer_returns_all_three_vectors(teacher):
-    answer = teacher.answer("How is CRAO treated?")
-    assert set(answer.sections) == {"head", "heart", "hands"}
+def test_title_and_overview_come_first(answer):
+    assert answer.title.startswith("Management of")
+    assert "sudden vision loss" in answer.overview
 
 
-def test_covered_and_uncovered_are_reported(teacher):
-    answer = teacher.answer("How is CRAO treated?")
+def test_cards_carry_headline_and_bullets(answer):
+    assert answer.cards[0].headline == "CRAO is an arterial blockage."
+    assert answer.cards[0].bullets == ["fact one", "fact two"]
+
+
+def test_picture_this_is_captured(answer):
+    assert "fovea" in answer.picture_this
+
+
+def test_retrieval_question_is_captured(answer):
+    assert answer.retrieval_question == "What determines outcome in CRAO?"
+
+
+def test_cards_are_ordered_head_then_heart_then_hands():
+    payload = reply(cards=[
+        card("hands", "H."), card("heart", "E.", citations=["crao.pdf p1"]),
+        card("head", "A."),
+    ])
+    assert [c.vector for c in teach(payload).cards] == ["head", "heart", "hands"]
+
+
+def test_several_cards_per_vector_are_kept():
+    payload = reply(cards=[
+        card("hands", "Medical management."),
+        card("hands", "Surgical escalation."),
+    ])
+    assert len(teach(payload).cards_for("hands")) == 2
+
+
+def test_sources_are_deduplicated_in_order(answer):
+    assert answer.sources == ["crao.pdf p1", "crao.pdf p3-4"]
+
+
+def test_coverage_is_derived_from_grounded_cards(answer):
     assert answer.covered_vectors == ["head", "hands"]
     assert answer.uncovered_vectors == ["heart"]
 
 
-def test_gap_report_is_preserved(teacher):
-    answer = teacher.answer("How is CRAO treated?")
+def test_gap_report_is_preserved(answer):
     assert any("consent" in g for g in answer.gap_report)
 
 
-def test_retrieved_hits_are_returned_for_inspection(teacher):
-    answer = teacher.answer("How is CRAO treated?")
+def test_retrieved_hits_are_returned_for_inspection(answer):
     assert len(answer.hits) == 2
 
 
+# --- what is sent to the model ----------------------------------------------
+
 def test_the_schema_is_sent_to_the_model():
     client = FakeClient()
-    Teacher(pipeline=FakePipeline(), client=client).answer("q")
+    Teacher(FakePipeline(), client).answer("q")
     assert client.schema == TEACH_SCHEMA
 
 
 def test_the_prompt_carries_context_and_question():
     client = FakeClient()
-    Teacher(pipeline=FakePipeline(), client=client).answer("How is CRAO treated?")
+    Teacher(FakePipeline(), client).answer("How is CRAO treated?")
     assert "ocular massage" in client.user
     assert "How is CRAO treated?" in client.user
 
 
 def test_the_system_prompt_is_the_3h_spec():
     client = FakeClient()
-    Teacher(pipeline=FakePipeline(), client=client).answer("q")
+    Teacher(FakePipeline(), client).answer("q")
     assert "3H PEDAGOGICAL AGENT" in client.system
     assert "MODE 3: TEACHING" in client.system
 
@@ -136,71 +183,82 @@ def test_the_system_prompt_is_the_3h_spec():
 # --- citation verification (the safety net) ---------------------------------
 
 def test_invented_citations_are_discarded():
-    payload = reply(head={"covered": True, "content": "Something.",
-                          "citations": ["crao.pdf p1", "made-up.pdf p9"]})
-    answer = Teacher(FakePipeline(), FakeClient(payload)).answer("q")
-    assert answer.sections["head"].citations == ["crao.pdf p1"]
-    assert answer.sections["head"].dropped_citations == ["made-up.pdf p9"]
-    assert any("made-up.pdf p9" in w for w in answer.warnings)
+    payload = reply(cards=[card(citations=["crao.pdf p1", "made-up.pdf p9"])])
+    result = teach(payload)
+    assert result.cards[0].citations == ["crao.pdf p1"]
+    assert result.cards[0].dropped_citations == ["made-up.pdf p9"]
+    assert any("made-up.pdf p9" in w for w in result.warnings)
 
 
 def test_bracketed_citations_are_accepted():
     """The model may or may not include brackets; both mean the same source."""
-    payload = reply(head={"covered": True, "content": "X.",
-                          "citations": ["[crao.pdf p1]"]})
-    answer = Teacher(FakePipeline(), FakeClient(payload)).answer("q")
-    assert answer.sections["head"].citations == ["crao.pdf p1"]
-    assert answer.sections["head"].covered is True
+    result = teach(reply(cards=[card(citations=["[crao.pdf p1]"])]))
+    assert result.cards[0].citations == ["crao.pdf p1"]
+    assert result.cards[0].grounded
 
 
 def test_empty_string_citations_are_ignored():
-    """gemma4 emits [""] for an empty section rather than []."""
-    payload = reply(heart={"covered": False, "content": "", "citations": [""]})
-    answer = Teacher(FakePipeline(), FakeClient(payload)).answer("q")
-    assert answer.sections["heart"].citations == []
-    assert answer.sections["heart"].dropped_citations == []
+    """gemma4 emits [""] rather than [] in some replies."""
+    result = teach(reply(cards=[card(citations=[""])]))
+    assert result.cards[0].citations == []
+    assert result.cards[0].dropped_citations == []
 
 
-def test_a_covered_vector_with_no_valid_citation_is_demoted():
-    """Content citing only invented sources is not grounded, whatever it claims."""
-    payload = reply(heart={"covered": True,
-                           "content": "Always obtain informed consent.",
-                           "citations": ["invented.pdf p1"]})
-    answer = Teacher(FakePipeline(), FakeClient(payload)).answer("q")
-    assert answer.sections["heart"].covered is False
-    assert any("no citation traceable" in w for w in answer.warnings)
+def test_a_card_citing_only_invented_sources_is_flagged_ungrounded():
+    result = teach(reply(cards=[card(citations=["invented.pdf p1"])]))
+    assert result.cards[0].grounded is False
+    assert any("no citation traceable" in w for w in result.warnings)
 
 
-def test_a_covered_vector_with_content_but_zero_citations_is_demoted():
-    payload = reply(heart={"covered": True,
-                           "content": "Consent must be obtained.", "citations": []})
-    answer = Teacher(FakePipeline(), FakeClient(payload)).answer("q")
-    assert answer.sections["heart"].covered is False
+def test_an_ungrounded_card_does_not_count_towards_coverage():
+    result = teach(reply(cards=[card("heart", "Consent matters.", citations=[])]))
+    assert "heart" not in result.covered_vectors
 
 
-def test_an_honestly_empty_vector_produces_no_warning(teacher):
-    answer = teacher.answer("How is CRAO treated?")
-    assert answer.sections["heart"].covered is False
+def test_a_clean_answer_produces_no_warnings(answer):
     assert answer.warnings == []
 
 
 def test_unverified_claims_are_surfaced():
-    payload = reply(unverified_claims=["Time to presentation affects outcome."])
-    answer = Teacher(FakePipeline(), FakeClient(payload)).answer("q")
-    assert answer.unverified_claims == ["Time to presentation affects outcome."]
+    result = teach(reply(unverified_claims=["Time to presentation affects outcome."]))
+    assert result.unverified_claims == ["Time to presentation affects outcome."]
+
+
+# --- malformed model output -------------------------------------------------
+
+def test_cards_with_an_unknown_vector_are_dropped():
+    result = teach(reply(cards=[card("spleen", "Nonsense."), card("head", "Real.")]))
+    assert [c.vector for c in result.cards] == ["head"]
+
+
+def test_cards_without_a_headline_are_dropped():
+    result = teach(reply(cards=[card(headline="   "), card(headline="Real.")]))
+    assert len(result.cards) == 1
+
+
+def test_non_dict_cards_do_not_crash():
+    result = teach(reply(cards=["not a card", None, card()]))
+    assert len(result.cards) == 1
+
+
+def test_missing_fields_do_not_crash():
+    result = teach({"title": "T"})
+    assert result.cards == []
+    assert result.gap_report == []
+    assert result.overview == ""
+    assert result.uncovered_vectors == ["head", "heart", "hands"]
 
 
 # --- failure paths ----------------------------------------------------------
 
-def test_empty_question_is_rejected(teacher):
+def test_empty_question_is_rejected():
     with pytest.raises(ValueError):
-        teacher.answer("   ")
+        Teacher(FakePipeline(), FakeClient()).answer("   ")
 
 
 def test_no_retrieval_results_raises_rather_than_inventing():
-    teacher = Teacher(FakePipeline(hits=[]), FakeClient())
     with pytest.raises(LLMError, match="nothing in the corpus"):
-        teacher.answer("something absent")
+        Teacher(FakePipeline(hits=[]), FakeClient()).answer("something absent")
 
 
 def test_model_errors_propagate():
@@ -209,20 +267,18 @@ def test_model_errors_propagate():
         teacher.answer("q")
 
 
-def test_missing_fields_do_not_crash():
-    """A model may omit optional arrays; absence must not raise."""
-    answer = Teacher(FakePipeline(), FakeClient({"topic": "T"})).answer("q")
-    assert answer.gap_report == []
-    assert answer.unverified_claims == []
-    assert all(not s.covered for s in answer.sections.values())
-
-
 # --- prompt loading ---------------------------------------------------------
 
 def test_system_prompt_includes_both_files():
     prompt = load_system_prompt()
-    assert "3H PEDAGOGICAL AGENT" in prompt      # 3h_agent.md
+    assert "3H PEDAGOGICAL AGENT" in prompt          # 3h_agent.md
     assert "RAGForge deployment addendum" in prompt  # 3h_deployment.md
+
+
+def test_deployment_prompt_describes_the_card_shape():
+    prompt = load_system_prompt()
+    assert "picture_this" in prompt
+    assert "headline" in prompt
 
 
 def test_missing_prompt_directory_is_a_clear_error(tmp_path):

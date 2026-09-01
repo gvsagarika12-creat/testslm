@@ -18,35 +18,42 @@ from ragforge.store import Hit
 
 VECTORS = ("head", "heart", "hands")
 
+VECTOR_BADGES = {
+    "head": "HEAD",
+    "heart": "HEART",
+    "hands": "HANDS",
+}
+
 VECTOR_LABELS = {
     "head": "HEAD — cognitive",
     "heart": "HEART — affective",
     "hands": "HANDS — psychomotor",
 }
 
-_SECTION_SCHEMA = {
+_CARD_SCHEMA = {
     "type": "object",
     "properties": {
-        "covered": {"type": "boolean"},
-        "content": {"type": "string"},
+        "vector": {"type": "string", "enum": list(VECTORS)},
+        "headline": {"type": "string"},
+        "bullets": {"type": "array", "items": {"type": "string"}},
         "citations": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["covered", "content", "citations"],
+    "required": ["vector", "headline", "bullets", "citations"],
 }
 
 TEACH_SCHEMA = {
     "type": "object",
     "properties": {
-        "topic": {"type": "string"},
-        "head": _SECTION_SCHEMA,
-        "heart": _SECTION_SCHEMA,
-        "hands": _SECTION_SCHEMA,
+        "title": {"type": "string"},
+        "overview": {"type": "string"},
+        "cards": {"type": "array", "items": _CARD_SCHEMA},
+        "picture_this": {"type": "string"},
         "gap_report": {"type": "array", "items": {"type": "string"}},
         "unverified_claims": {"type": "array", "items": {"type": "string"}},
         "retrieval_question": {"type": "string"},
     },
     "required": [
-        "topic", "head", "heart", "hands",
+        "title", "overview", "cards", "picture_this",
         "gap_report", "unverified_claims", "retrieval_question",
     ],
 }
@@ -70,10 +77,12 @@ def _normalize_citation(raw: str) -> str:
 
 
 @dataclass
-class VectorSection:
+class TeachingCard:
+    """One teaching point: a claim, its supporting facts, and its sources."""
+
     vector: str
-    covered: bool
-    content: str
+    headline: str
+    bullets: list[str] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
     dropped_citations: list[str] = field(default_factory=list)
 
@@ -81,12 +90,19 @@ class VectorSection:
     def label(self) -> str:
         return VECTOR_LABELS[self.vector]
 
+    @property
+    def grounded(self) -> bool:
+        """Whether any claim here traces to a retrieved passage."""
+        return bool(self.citations)
+
 
 @dataclass
 class TeachAnswer:
     question: str
-    topic: str
-    sections: dict[str, VectorSection]
+    title: str
+    overview: str
+    cards: list[TeachingCard]
+    picture_this: str
     gap_report: list[str]
     unverified_claims: list[str]
     retrieval_question: str
@@ -94,13 +110,29 @@ class TeachAnswer:
     warnings: list[str] = field(default_factory=list)
     llm: LLMResponse | None = None
 
+    def cards_for(self, vector: str) -> list[TeachingCard]:
+        return [c for c in self.cards if c.vector == vector]
+
     @property
     def covered_vectors(self) -> list[str]:
-        return [v for v in VECTORS if self.sections[v].covered]
+        """A vector is covered when it has at least one grounded card."""
+        return [
+            v for v in VECTORS if any(c.grounded for c in self.cards_for(v))
+        ]
 
     @property
     def uncovered_vectors(self) -> list[str]:
-        return [v for v in VECTORS if not self.sections[v].covered]
+        return [v for v in VECTORS if v not in self.covered_vectors]
+
+    @property
+    def sources(self) -> list[str]:
+        """Every cited passage, in the order the vectors are taught."""
+        seen: list[str] = []
+        for card in self.cards:
+            for citation in card.citations:
+                if citation not in seen:
+                    seen.append(citation)
+        return seen
 
 
 def load_system_prompt(config: Settings | None = None) -> str:
@@ -116,19 +148,30 @@ def load_system_prompt(config: Settings | None = None) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def _parse_section(vector: str, raw: dict, allowed: set[str]) -> VectorSection:
-    """Build a section, discarding citations that were never retrieved."""
+def _parse_card(raw: dict, allowed: set[str]) -> TeachingCard | None:
+    """Build a card, discarding citations that were never retrieved.
+
+    Returns None for a card with no vector or no headline — a malformed entry
+    is dropped rather than rendered as an empty box.
+    """
+    vector = str(raw.get("vector") or "").strip().lower()
+    if vector not in VECTORS:
+        return None
+    headline = (raw.get("headline") or "").strip()
+    if not headline:
+        return None
+
     kept, dropped = [], []
     for citation in raw.get("citations") or []:
         normalized = _normalize_citation(str(citation))
         if not normalized:
-            continue  # models sometimes emit [""] for an empty section
+            continue  # models sometimes emit [""] rather than []
         (kept if normalized in allowed else dropped).append(normalized)
 
-    return VectorSection(
+    return TeachingCard(
         vector=vector,
-        covered=bool(raw.get("covered")),
-        content=(raw.get("content") or "").strip(),
+        headline=headline,
+        bullets=[str(b).strip() for b in (raw.get("bullets") or []) if str(b).strip()],
         citations=kept,
         dropped_citations=dropped,
     )
@@ -177,31 +220,37 @@ class Teacher:
             schema=TEACH_SCHEMA,
         )
 
-        sections = {
-            v: _parse_section(v, parsed.get(v) or {}, allowed) for v in VECTORS
-        }
-        warnings: list[str] = []
+        cards: list[TeachingCard] = []
+        for raw_card in parsed.get("cards") or []:
+            card = _parse_card(raw_card if isinstance(raw_card, dict) else {}, allowed)
+            if card is not None:
+                cards.append(card)
 
-        for section in sections.values():
-            if section.dropped_citations:
+        # Teach in the framework's own order, whatever order the model emitted.
+        cards.sort(key=lambda c: VECTORS.index(c.vector))
+
+        warnings: list[str] = []
+        for card in cards:
+            if card.dropped_citations:
                 warnings.append(
-                    f"{section.vector}: discarded citation(s) not in the retrieved "
-                    f"passages — {', '.join(section.dropped_citations)}"
+                    f"{card.vector}: discarded citation(s) not in the retrieved "
+                    f"passages — {', '.join(card.dropped_citations)}"
                 )
-            # A vector claiming coverage with no verifiable citation is not
-            # grounded, whatever it says. R0.1 makes that a contract violation,
-            # so demote it rather than presenting it as sourced.
-            if section.covered and section.content and not section.citations:
-                section.covered = False
+            # R0.1: a claim that traces to nothing is ungrounded, whatever the
+            # model asserts. Surfaced rather than silently dropped — the reader
+            # decides, but is told.
+            if not card.grounded:
                 warnings.append(
-                    f"{section.vector}: marked uncovered — content had no citation "
+                    f"{card.vector}: \"{card.headline[:60]}\" has no citation "
                     f"traceable to the retrieved passages"
                 )
 
         return TeachAnswer(
             question=question.strip(),
-            topic=(parsed.get("topic") or question).strip(),
-            sections=sections,
+            title=(parsed.get("title") or question).strip(),
+            overview=(parsed.get("overview") or "").strip(),
+            cards=cards,
+            picture_this=(parsed.get("picture_this") or "").strip(),
             gap_report=[str(g).strip() for g in (parsed.get("gap_report") or []) if str(g).strip()],
             unverified_claims=[
                 str(c).strip() for c in (parsed.get("unverified_claims") or []) if str(c).strip()
