@@ -180,6 +180,13 @@ class OllamaClient:
                 "model": self.model,
                 "stream": True,
                 "format": schema,
+                # gemma4 is a thinking model, and left to itself it spends the
+                # entire output budget reasoning: measured at 2,910 tokens of
+                # thinking, done_reason "length", and zero characters of actual
+                # content. The reply here is a strict JSON schema that is never
+                # shown to the reader, so the deliberation buys nothing and
+                # costs both the answer and roughly 100 seconds of generation.
+                "think": False,
                 # num_ctx is deliberately modest. Asking for 16384 alongside an
                 # 8.4GB model made the server stall long enough that the proxy
                 # gave up before a single token was emitted, while 8192 produced

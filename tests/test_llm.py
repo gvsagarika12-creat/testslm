@@ -287,3 +287,16 @@ def test_it_asks_the_server_to_keep_the_model_loaded(monkeypatch, client):
     fake_urlopen(monkeypatch, ok_body(), capture)
     client.chat_json("sys", "usr", SCHEMA)
     assert json.loads(capture["request"].data)["keep_alive"] == "30m"
+
+
+def test_thinking_is_disabled_for_structured_requests(monkeypatch, client):
+    """gemma4 spends its whole output budget thinking and never emits the JSON.
+
+    Measured: 2,910 output tokens of reasoning, done_reason "length", zero
+    characters of content. The reply is a schema the reader never sees, so the
+    deliberation costs the answer and ~100s for nothing.
+    """
+    capture = {}
+    fake_urlopen(monkeypatch, ok_body(), capture)
+    client.chat_json("sys", "usr", SCHEMA)
+    assert json.loads(capture["request"].data)["think"] is False
